@@ -1,0 +1,34 @@
+# Local development database. The API itself runs with `dotnet run` (and on the Pi as a
+# systemd service): Compose is only for Postgres.
+#   docker compose up -d
+#
+# Port 5434, not 5432/5433: the VerseMate (5432) and amicus-api (5433) dev databases use
+# those on the same machines, and running all three at once should just work.
+name: campuspulse
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: campuspulse-postgres
+    environment:
+      POSTGRES_DB: campuspulse
+      POSTGRES_USER: campuspulse
+      POSTGRES_PASSWORD: campuspulse_dev
+    ports:
+      # 127.0.0.1 on purpose. A bare "5434:5432" binds 0.0.0.0, and Docker's published
+      # ports bypass UFW, so the whole LAN (and tailnet) could reach this database with the
+      # password in this public file.
+      - "127.0.0.1:5434:5432"
+    volumes:
+      # NOT /var/lib/postgresql/data: Postgres 18+ images keep data in a major-version
+      # subdirectory and refuse to start if the volume is mounted at the old path.
+      - campuspulse-pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U campuspulse -d campuspulse"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  campuspulse-pgdata:

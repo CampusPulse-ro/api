@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A new push supersedes the run in flight for the same branch.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: build & test
+    runs-on: ubuntu-latest
+    # No Postgres service yet: no test touches the database. Add one (as amicus-api has)
+    # with the first test that does; an in-memory provider would not enforce Postgres rules.
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - run: dotnet restore
+
+      # Code warnings fail the build, but NuGet audit warnings (NU19xx) only warn: a newly
+      # published advisory against a transitive package would otherwise block every open PR
+      # overnight through no fault of the change.
+      - name: Build
+        run: dotnet build --no-restore -c Release -warnaserror -warnnotaserror:NU1901,NU1902,NU1903,NU1904
+
+      - name: Test
+        run: dotnet test --no-build -c Release
+
+  publish:
+    name: publish (framework-dependent)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      # Portable, framework-dependent output: runs wherever the .NET 10 runtime is installed,
+      # the Pi included. The deploy workflow will ship this artifact to the Pi, so nothing is
+      # ever built there.
+      - run: dotnet publish src/CampusPulse.Api -c Release -o publish
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: campuspulse-api
+          path: publish
+          retention-days: 14
+
+  container:
+    name: container image (amd64 + arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      # Built by the SDK from the csproj (no Dockerfile) into a tarball, not pushed: this only
+      # proves the image still builds for both architectures. Pushing to GHCR comes with a
+      # cloud deploy, if one is ever wanted.
+      - name: Build the image
+        run: >
+          dotnet publish src/CampusPulse.Api -c Release -t:PublishContainer
+          -p ContainerArchiveOutputPath=${{ runner.temp }}/campuspulse-api.tar.gz
