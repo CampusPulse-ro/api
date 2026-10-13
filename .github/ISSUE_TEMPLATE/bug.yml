@@ -1,0 +1,35 @@
+name: Bug
+description: Something doesn't work as it should
+labels: ["bug"]
+projects: ["CampusPulse-ro/1"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw. Paste the exact error message if there is one.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should happen
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      value: |
+        1. 
+    validations:
+      required: true
+  - type: input
+    id: where
+    attributes:
+      label: Where
+      description: Device / OS / browser, app version or commit, and which account or data.
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Screenshots or logs

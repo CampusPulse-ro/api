@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <!-- Production runs on a Raspberry Pi 5, where RAM is the binding constraint.
+         Measured on amicus-api, same host: Workstation GC gave the same throughput as
+         Server GC for ~47 MB less peak memory (Server GC allocates one heap per core). -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <!-- Container image without a Dockerfile: `dotnet publish -t:PublishContainer` (built into
+       the SDK; no Docker daemon needed to build it). Only for hosts that run images (Cloud Run,
+       Azure Container Apps, Fly.io). The Pi runs the plain published output under systemd.
+       Base image, non-root `app` user and port 8080 are the SDK defaults for ASP.NET Core. -->
+  <PropertyGroup>
+    <ContainerRepository>campuspulse-api</ContainerRepository>
+    <ContainerRuntimeIdentifiers>linux-x64;linux-arm64</ContainerRuntimeIdentifiers>
+    <!-- Restore must include both targets, or the multi-arch publish fails NETSDK1047. This only
+         affects restore: a build or publish without -r stays portable. -->
+    <RuntimeIdentifiers>linux-x64;linux-arm64</RuntimeIdentifiers>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.5" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.11">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <!-- Pinned: Microsoft.AspNetCore.OpenApi pulls in Microsoft.OpenApi 2.0.0, which carries
+         GHSA-v5pm-xwqc-g5wc (high: circular schema refs abort parsing). 2.7.5 is the first
+         patched 2.x release. Do NOT jump to 3.x: it makes IOpenApiMediaType.Example read-only
+         and the ASP.NET Core 10 XML-comment source generator fails to compile. -->
+    <PackageReference Include="Microsoft.OpenApi" Version="2.7.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CampusPulse.Domain\CampusPulse.Domain.csproj" />
+    <ProjectReference Include="..\CampusPulse.Infrastructure\CampusPulse.Infrastructure.csproj" />
+  </ItemGroup>
+
+</Project>

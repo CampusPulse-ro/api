@@ -1,0 +1,35 @@
+name: Task
+description: A piece of work that becomes one pull request
+projects: ["CampusPulse-ro/1"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What should exist or work when this is done, in one or two sentences.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: >-
+        Why it's needed, and everything needed to do it: which screens or files, API endpoints,
+        designs, links, earlier issues. Write it so someone (or an AI) with no other background can
+        start.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: How we know it's done. Each one checkable.
+      value: |
+        - [ ] 
+    validations:
+      required: true
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+      description: What this issue deliberately does not cover, so the PR stays small.
