@@ -1,0 +1,30 @@
+# LF in the repository and in every checkout, Windows included: a CRLF checkout (core.autocrlf
+# on a Windows machine) otherwise turns every touched file into a whole-file diff.
+* text=auto eol=lf
+
+# Windows-only scripts keep CRLF. text=auto, not text: a UTF-16 script is detected as binary
+# and left alone instead of being corrupted by line-ending conversion.
+*.cmd text=auto eol=crlf
+*.bat text=auto eol=crlf
+*.ps1 text=auto eol=crlf
+
+# Never touched.
+*.png binary
+*.webp binary
+*.bmp binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.xlsx binary
+*.zip binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.eot binary
+*.p12 binary
+*.snk binary
+*.dll binary
+*.exe binary

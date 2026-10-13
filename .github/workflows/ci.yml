@@ -28,6 +28,11 @@ jobs:
 
       - run: dotnet restore
 
+      # Formatting and code style per .editorconfig, before Build so a style problem shows up as
+      # a format diff rather than a compiler error. Fix locally with `dotnet format`.
+      - name: Format
+        run: dotnet format --verify-no-changes --no-restore
+
       # Code warnings fail the build, but NuGet audit warnings (NU19xx) only warn: a newly
       # published advisory against a transitive package would otherwise block every open PR
       # overnight through no fault of the change.
