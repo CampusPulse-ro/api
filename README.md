@@ -41,6 +41,8 @@ dotnet run --project src/CampusPulse.Api   # http://localhost:5280 (connection s
 dotnet test
 ```
 
+Formatting follows `.editorconfig`: run `dotnet format` before committing; CI fails on unformatted code.
+
 CI (`.github/workflows/ci.yml`) builds with warnings as errors, runs the tests, publishes the
 app as an artifact, and builds the container image for `linux/amd64` and `linux/arm64`
 without pushing it.
