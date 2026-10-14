@@ -141,6 +141,9 @@ without pushing it.
   admins can create `v*` tags). The `Release` workflow builds it, attests the build and attaches
   `campuspulse-api.tar.gz` and `efbundle` (the migrations bundle); the Pi verifies the attestation and
   deploys exactly that version to prod. Pre-releases and drafts are never deployed.
+  Cut one with `gh release create vX.Y.Z --target main --generate-notes`: the notes group merged PRs
+  by label (`enhancement`/`feat`, `bug`, `dependencies`, the rest), configured in
+  [`.github/release.yml`](.github/release.yml). Label PRs so they land in the right group.
 - **Rolling back:** on the Pi, `campuspulse-deploy rollback prod` (or `stage`) switches to the
   healthy release before the live one. It restores code, not schema. To roll forward again:
   `campuspulse-deploy prod <run-id> vX.Y.Z --force`.
