@@ -1,0 +1,95 @@
+# A published GitHub Release (tag vX.Y.Z on a commit already on main) is what deploys prod. This
+# workflow builds that tag and attaches the two files the Pi's deploy downloads
+# (deploy/pi/campuspulse-deploy):
+#   campuspulse-api.tar.gz   the framework-dependent publish output
+#   efbundle                 the EF Core migrations bundle, self-contained for linux-arm64
+# Both carry a build attestation (signed by GitHub for this workflow at this tag), which the Pi
+# verifies before deploying, so a file swapped into the release later is refused. When this
+# workflow succeeds, GitHub's workflow_run webhook tells the Pi to deploy. The Pi deploys only runs
+# of THIS file (.github/workflows/release.yml); pre-releases and drafts are skipped.
+name: Release
+
+on:
+  release:
+    # `released`, not `published`: it fires for a new full release AND for a pre-release promoted to one,
+    # and never for pre-releases or drafts.
+    types: [released]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build release assets
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write       # build attestations
+      attestations: write
+    env:
+      TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the tag and that its commit is on main
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "::error::release tag '$TAG' is not vX.Y.Z; the Pi would refuse it"; exit 1; }
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "::error::$TAG ($GITHUB_SHA) is not on main: only reviewed code is released"; exit 1; }
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '10.0.x'
+
+      - run: dotnet tool restore
+
+      - name: Publish the API
+        run: |
+          dotnet publish src/CampusPulse.Api -c Release -o out/app
+          tar -czf campuspulse-api.tar.gz -C out/app .
+
+      - name: Build the migrations bundle
+        run: >
+          dotnet ef migrations bundle --project src/CampusPulse.Infrastructure
+          --startup-project src/CampusPulse.Api --self-contained -r linux-arm64
+          -o efbundle --force
+
+      - name: Attest the build
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            campuspulse-api.tar.gz
+            efbundle
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-assets
+          path: |
+            campuspulse-api.tar.gz
+            efbundle
+          retention-days: 7
+
+  publish:
+    name: attach to the release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # only this job can write, and it runs no project code
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-assets
+
+      - name: Attach (never replaces files already on the release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" campuspulse-api.tar.gz efbundle -R "$GITHUB_REPOSITORY"

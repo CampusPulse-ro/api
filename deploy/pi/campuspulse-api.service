@@ -1,0 +1,57 @@
+[Unit]
+Description=CampusPulse backend API (PROD)
+Documentation=https://github.com/CampusPulse-ro/api
+After=network-online.target docker.service campuspulse-netguard.service
+Wants=network-online.target docker.service
+# Fail closed: without the network guard the app could reach every local service.
+Requires=campuspulse-netguard.service
+
+[Service]
+Type=simple
+# One user per environment: stage code can't read prod's process or its files. The env file
+# is root-only (0600); systemd reads it before dropping to this user.
+User=campuspulse-prod
+Group=campuspulse-prod
+# current -> releases/<version> (root-owned, read-only for the app), switched by the deploy.
+WorkingDirectory=/srv/campuspulse/apps/api-prod/current
+EnvironmentFile=/srv/campuspulse/.config/campuspulse/api-prod.env
+Environment=ASPNETCORE_ENVIRONMENT=Production
+Environment=ASPNETCORE_URLS=http://127.0.0.1:5092
+Environment=DOTNET_EnableDiagnostics=0
+# Re-apply the guard on every start (as root, '+'), so a flushed ruleset can't leave the app unguarded.
+ExecStartPre=+/usr/sbin/nft -f /etc/campuspulse/netguard.nft
+ExecStart=/opt/dotnet/dotnet /srv/campuspulse/apps/api-prod/current/CampusPulse.Api.dll
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+# No AF_UNIX: the app talks TCP only, so world-writable local sockets stay out of reach.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+UMask=0077
+# Not MemoryDenyWriteExecute: .NET's JIT needs writable+executable memory.
+# Hide the rest of /srv, /mnt and /nas (world-readable backups and media live there); bring back
+# only this environment's releases (read-only) and its log folder.
+TemporaryFileSystem=/srv:ro /mnt:ro /nas:ro
+BindReadOnlyPaths=/srv/campuspulse/apps/api-prod
+BindPaths=/srv/campuspulse/logs/prod
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,22 @@
+# CampusPulse Postgres on the Pi: one container, a database + role per environment
+# (campuspulse_stage, campuspulse_prod). Admin credentials: ~thorsp/.config/campuspulse/postgres.env.
+# Bound to 127.0.0.1 only: Docker-published ports bypass UFW. Dumped nightly by pibackup.
+name: campuspulse
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: campuspulse-postgres
+    env_file: /home/thorsp/.config/campuspulse/postgres.env
+    ports:
+      - "127.0.0.1:5435:5432"
+    volumes:
+      - campuspulse-pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    mem_limit: 512m
+volumes:
+  campuspulse-pgdata:
