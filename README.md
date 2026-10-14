@@ -19,11 +19,12 @@ tests/CampusPulse.Api.Tests     in-process tests of the HTTP surface (WebApplica
 
 ## Configuration
 
-Environment variables only. The one setting so far:
+Environment variables only:
 
 | Variable | What |
 |---|---|
 | `ConnectionStrings__Postgres` | Npgsql connection string. Required: startup fails fast without it. The database does not have to be reachable for the API to start. |
+| `Cors__AllowedOrigins__<n>` | browser origins allowed to call the API; `https://*.example.com` allows any subdomain (Cloudflare PR previews). None set = no browser origin allowed |
 
 ## Running it
 
@@ -96,18 +97,24 @@ without pushing it.
 
 ## Deploying
 
-There is no Dockerfile. .NET runs the same build on any OS, so:
+| | stage | prod |
+|---|---|---|
+| URL | https://campuspulse-api-stage.thorsp.net | https://campuspulse-api.thorsp.net |
+| Deployed by | every merge to `main` (a green `CI` run) | a published GitHub Release `vX.Y.Z` |
+| Used by | web PR previews and staging, mobile dev and preview builds | web production, mobile production builds |
 
-- **Raspberry Pi (production):** a systemd service runs the framework-dependent publish
-  output (`dotnet CampusPulse.Api.dll`) with its environment from an `EnvironmentFile`. CI
-  builds it on GitHub's runners; nothing is built on the Pi.
-- **Hosts that only run images** (Cloud Run, Azure Container Apps, Fly.io): the SDK builds
-  the image from the csproj, with no Dockerfile and no Docker daemon:
+- **Releasing:** publish a GitHub Release with a `vX.Y.Z` tag on a commit that is on `main` (only
+  admins can create `v*` tags). The `Release` workflow builds it, attests the build and attaches
+  `campuspulse-api.tar.gz` and `efbundle` (the migrations bundle); the Pi verifies the attestation and
+  deploys exactly that version to prod. Pre-releases and drafts are never deployed.
+- **Rolling back:** on the Pi, `campuspulse-deploy rollback prod` (or `stage`) switches to the
+  healthy release before the live one. It restores code, not schema. To roll forward again:
+  `campuspulse-deploy prod <run-id> vX.Y.Z --force`.
+- How the Pi side works and how it was set up: [`deploy/pi/README.md`](deploy/pi/README.md).
+- There is no Dockerfile. Hosts that only run images get one from the SDK
+  (`dotnet publish -t:PublishContainer`), multi-arch (`linux-x64` + `linux-arm64`) from the csproj:
 
   ```bash
   dotnet publish src/CampusPulse.Api -c Release -t:PublishContainer \
     -p ContainerRegistry=ghcr.io -p ContainerRepository=campuspulse-ro/campuspulse-api
   ```
-
-  One command gives a multi-arch image (`linux-x64` + `linux-arm64`, set by
-  `ContainerRuntimeIdentifiers` in the csproj).

@@ -1,0 +1,23 @@
+# CampusPulse network guard: what the API's users (campuspulse-stage, campuspulse-prod) may connect to.
+# Loaded by campuspulse-netguard.service and again by each API unit before it starts (ExecStartPre), so
+# a flushed ruleset can't leave the app running unguarded.
+#
+# DENY BY DEFAULT. The app (and its migration bundle) may only answer connections made to it (nginx)
+# and open connections to its own Postgres on 127.0.0.1:5435. Nothing else: not other local services,
+# not the LAN or tailnet, and not the public internet, because the Pi's own public IP comes back
+# through the router's hairpin NAT looking like LAN traffic. If the app ever needs an outside service,
+# allow that destination explicitly here.
+table inet campuspulse_guard
+flush table inet campuspulse_guard
+table inet campuspulse_guard {
+	chain output {
+		type filter hook output priority filter; policy accept;
+		meta skuid { "campuspulse-stage", "campuspulse-prod" } jump app_out
+	}
+	chain app_out {
+		ct state established,related accept
+		# The ORIGINAL destination, so it also holds if Docker ever DNATs the port instead of docker-proxy.
+		meta l4proto tcp ct original ip daddr 127.0.0.1 ct original proto-dst 5435 accept
+		counter reject
+	}
+}

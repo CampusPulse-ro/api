@@ -1,3 +1,4 @@
+using CampusPulse.Api;
 using CampusPulse.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -5,7 +6,17 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddCampusPulsePersistence(builder.Configuration);
 builder.Services.AddOpenApi();
 
+// The web app calls the API from the browser. Origins per environment: Cors:AllowedOrigins
+// (see CorsOrigins). Bearer tokens, not cookies, so no credentials mode.
+var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
+builder.Services.AddCors(options => options.AddDefaultPolicy(policy => policy
+    .SetIsOriginAllowed(origin => CorsOrigins.IsAllowed(origin, allowedOrigins))
+    .AllowAnyHeader()
+    .AllowAnyMethod()));
+
 var app = builder.Build();
+
+app.UseCors();
 
 // Served in every environment, not only Development: this document is the contract the
 // mobile and web clients generate their typed API client from, so it has to be reachable

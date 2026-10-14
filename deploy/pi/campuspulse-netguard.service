@@ -1,0 +1,14 @@
+[Unit]
+Description=CampusPulse network guard (nftables rules for the API's users)
+Documentation=https://github.com/CampusPulse-ro/api/blob/main/deploy/pi/README.md
+Before=campuspulse-api-stage.service campuspulse-api.service
+After=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/campuspulse/netguard.nft
+ExecStop=/usr/sbin/nft delete table inet campuspulse_guard
+
+[Install]
+WantedBy=multi-user.target
