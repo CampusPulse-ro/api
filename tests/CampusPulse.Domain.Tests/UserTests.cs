@@ -47,6 +47,19 @@ public sealed class UserTests
     }
 
     [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("  ")]
+    public void A_token_without_name_or_email_keeps_the_stored_ones(string? missing)
+    {
+        var user = new User("oid-1", "ana@student.upt.ro", "Ana", T0);
+
+        Assert.False(user.Seen(missing, missing, T0.AddSeconds(1)));
+        Assert.Equal("ana@student.upt.ro", user.Email);
+        Assert.Equal("Ana", user.DisplayName);
+    }
+
+    [Theory]
     [InlineData("")]
     [InlineData("   ")]
     public void An_object_id_is_required(string oid) =>

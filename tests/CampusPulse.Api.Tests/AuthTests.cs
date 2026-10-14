@@ -3,10 +3,18 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text.Json;
+using CampusPulse.Api.Auth;
 using CampusPulse.Api.Users;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.IdentityModel.Protocols;
+using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using Microsoft.IdentityModel.Tokens;
 
 namespace CampusPulse.Api.Tests;
@@ -16,14 +24,19 @@ public sealed class AuthTests(AuthTests.ConfiguredFactory factory) : IClassFixtu
 {
     public sealed class ConfiguredFactory : WebApplicationFactory<Program>
     {
+        public CollectingLoggerProvider Logs { get; } = new();
+
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseEnvironment("Testing");
             builder.UseSetting("ConnectionStrings:Postgres",
                 "Host=127.0.0.1;Port=1;Database=unused;Username=unused;Password=unused;Timeout=2");
             TestAuth.Configure(builder);
+            builder.ConfigureTestServices(services => services.AddSingleton<ILoggerProvider>(Logs));
         }
     }
+
+    private const string OtherTenant = "99999999-2222-3333-4444-555555555555";
 
     public static TheoryData<string, string> RefusedTokens => new()
     {
@@ -36,6 +49,15 @@ public sealed class AuthTests(AuthTests.ConfiguredFactory factory) : IClassFixtu
         { "expired", TestAuth.Token(expired: true) },
         { "signed by another key", TestAuth.Token(signWith: new RsaSecurityKey(RSA.Create(2048)) { KeyId = "test-key" }) },
         { "no oid", TestAuth.Token(oid: null) },
+        { "issued to another app (azp)", TestAuth.Token(azp: "00000000-1111-2222-3333-444444444444") },
+        { "no azp", TestAuth.Token(azp: null) },
+        { "a guest from another tenant (idp)", TestAuth.Token(idp: $"https://sts.windows.net/{OtherTenant}/") },
+        { "a guest with a personal Microsoft account (idp)", TestAuth.Token(idp: "live.com") },
+        { "an app-only token (roles, no scp)", TestAuth.Token(scope: null, roles: ["Users.Read.All"], name: null, email: null,
+            extra: new Dictionary<string, object> { ["idtyp"] = "app" }) },
+        { "an ID token (aud = the bare client id, no scp, no azp)", TestAuth.Token(audience: TestAuth.ClientId, scope: null, azp: null,
+            extra: new Dictionary<string, object> { ["nonce"] = "n-1" }) },
+        { "signed with RS512, not RS256", TestAuth.Token(algorithm: SecurityAlgorithms.RsaSha512) },
     };
 
     [Fact]
@@ -59,9 +81,36 @@ public sealed class AuthTests(AuthTests.ConfiguredFactory factory) : IClassFixtu
     }
 
     [Fact]
-    public async Task Health_needs_no_token()
+    public async Task A_refusal_is_logged_at_warning_with_its_reason_and_never_the_token()
     {
-        Assert.Equal(HttpStatusCode.OK, (await factory.CreateClient().GetAsync("/health")).StatusCode);
+        var foreignApp = TestAuth.Token(azp: "00000000-1111-2222-3333-444444444444");
+        var expired = TestAuth.Token(expired: true);
+        foreach (var token in new[] { foreignApp, expired })
+        {
+            var request = new HttpRequestMessage(HttpMethod.Get, "/me");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            await factory.CreateClient().SendAsync(request);
+        }
+
+        var refusals = factory.Logs.Entries.Where(e => e.Category == AuthSetup.LogCategory && e.Level == LogLevel.Warning).ToList();
+        Assert.Contains(refusals, e => e.Message == "Bearer token refused: issued to another app (azp)");
+        Assert.Contains(refusals, e => e.Message == "Bearer token refused: SecurityTokenExpiredException");
+        Assert.DoesNotContain(factory.Logs.Entries, e => e.Message.Contains(foreignApp) || e.Message.Contains(expired));
+    }
+
+    [Fact]
+    public async Task Only_the_root_health_and_the_contract_are_public()
+    {
+        var client = factory.CreateClient();
+
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/health")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/openapi/v1.json")).StatusCode);
+        // The fallback policy: anything else, even a path that doesn't exist, needs a token first.
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/no-such-endpoint")).StatusCode);
+        var signedIn = new HttpRequestMessage(HttpMethod.Get, "/no-such-endpoint");
+        signedIn.Headers.Authorization = new AuthenticationHeaderValue("Bearer", TestAuth.Token());
+        Assert.Equal(HttpStatusCode.NotFound, (await client.SendAsync(signedIn)).StatusCode);
     }
 
     [Fact]
@@ -76,7 +125,92 @@ public sealed class AuthTests(AuthTests.ConfiguredFactory factory) : IClassFixtu
         Assert.True(me.GetProperty("security")[0].TryGetProperty("Bearer", out _));
         Assert.True(me.GetProperty("responses").TryGetProperty("200", out _));
         Assert.True(me.GetProperty("responses").TryGetProperty("401", out _));
-        Assert.False(doc.GetProperty("paths").GetProperty("/health").GetProperty("get").TryGetProperty("security", out _));
+        // Every operation is secured except the anonymous ones, the same rule as the fallback policy.
+        foreach (var path in doc.GetProperty("paths").EnumerateObject())
+        {
+            foreach (var operation in path.Value.EnumerateObject())
+            {
+                var secured = operation.Value.TryGetProperty("security", out _);
+                Assert.True(secured != path.Name.StartsWith("/health"), $"{operation.Name} {path.Name}: secured={secured}");
+            }
+        }
+    }
+}
+
+/// <summary>The startup check of the tenant's sign-in metadata (the Pi reaches it through a proxy).</summary>
+public sealed class AuthMetadataCheckTests
+{
+    private sealed class Factory(CollectingLoggerProvider logs, bool reachable) : WebApplicationFactory<Program>
+    {
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            builder.UseEnvironment("Testing");
+            builder.UseSetting("ConnectionStrings:Postgres",
+                "Host=127.0.0.1;Port=1;Database=unused;Username=unused;Password=unused;Timeout=2");
+            TestAuth.Configure(builder);
+            builder.ConfigureTestServices(services =>
+            {
+                services.AddSingleton<ILoggerProvider>(logs);
+                if (!reachable)
+                {
+                    services.PostConfigure<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme, options =>
+                    {
+                        options.Configuration = null;
+                        options.ConfigurationManager = new UnreachableConfigurationManager();
+                    });
+                }
+            });
+        }
+    }
+
+    /// <summary>What the network guard without the proxy looks like to JwtBearer.</summary>
+    private sealed class UnreachableConfigurationManager : IConfigurationManager<OpenIdConnectConfiguration>
+    {
+        public Task<OpenIdConnectConfiguration> GetConfigurationAsync(CancellationToken cancel) =>
+            throw new InvalidOperationException("IDX20803: Unable to obtain configuration.",
+                new HttpRequestException("Connection refused (login.microsoftonline.com:443)"));
+
+        public void RequestRefresh()
+        {
+        }
+    }
+
+    private static Task CheckDone(WebApplicationFactory<Program> factory) =>
+        factory.Services.GetServices<IHostedService>().OfType<AuthMetadataCheck>().Single().ExecuteTask!.WaitAsync(TimeSpan.FromSeconds(30));
+
+    [Fact]
+    public async Task Unreachable_metadata_is_one_error_and_the_app_still_serves()
+    {
+        var logs = new CollectingLoggerProvider();
+        using var factory = new Factory(logs, reachable: false);
+        var client = factory.CreateClient();
+        await CheckDone(factory);
+
+        var error = Assert.Single(logs.Entries, e => e.Level >= LogLevel.Error);
+        Assert.Equal(AuthSetup.LogCategory, error.Category);
+        Assert.Contains("InvalidOperationException", error.Message);
+        Assert.Contains("HttpRequestException", error.Message);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/health")).StatusCode);
+
+        // A server fault, not a bad token: 500 (a ProblemDetails), so a client doesn't send the
+        // student back through sign-in for it.
+        var request = new HttpRequestMessage(HttpMethod.Get, "/me");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", TestAuth.Token());
+        var response = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+    }
+
+    [Fact]
+    public async Task Reachable_metadata_is_one_information_line()
+    {
+        var logs = new CollectingLoggerProvider();
+        using var factory = new Factory(logs, reachable: true);
+        factory.CreateClient();
+        await CheckDone(factory);
+
+        Assert.DoesNotContain(logs.Entries, e => e.Level >= LogLevel.Error);
+        Assert.Single(logs.Entries, e => e.Category == AuthSetup.LogCategory && e.Message.StartsWith("Sign-in metadata loaded"));
     }
 }
 
@@ -131,6 +265,27 @@ public sealed class MeTests(PostgresAppFactory factory) : IClassFixture<Postgres
 
         Assert.Equal(HttpStatusCode.OK, (await GetMe(TestAuth.Token(oid: oid, audience: TestAuth.ClientId))).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await GetMe(TestAuth.Token(oid: oid, audience: $"api://{TestAuth.ClientId}"))).StatusCode);
+    }
+
+    [PostgresFact]
+    public async Task Members_are_accepted_with_no_idp_or_the_tenants_own()
+    {
+        Assert.Equal(HttpStatusCode.OK, (await GetMe(TestAuth.Token(oid: "oid-" + Guid.NewGuid().ToString("N")))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await GetMe(TestAuth.Token(oid: "oid-" + Guid.NewGuid().ToString("N"),
+            idp: $"https://sts.windows.net/{TestAuth.TenantId}/"))).StatusCode);
+    }
+
+    [PostgresFact]
+    public async Task A_token_without_name_or_email_keeps_the_stored_ones()
+    {
+        var oid = "oid-" + Guid.NewGuid().ToString("N");
+        Assert.Equal(HttpStatusCode.OK, (await GetMe(TestAuth.Token(oid: oid))).StatusCode);
+
+        var bare = await GetMe(TestAuth.Token(oid: oid, name: null, email: null));
+
+        var me = await bare.Content.ReadFromJsonAsync<MeResponse>();
+        Assert.Equal("ana@student.upt.ro", me!.Email);
+        Assert.Equal("Ana Pop", me.DisplayName);
     }
 
     [PostgresFact]

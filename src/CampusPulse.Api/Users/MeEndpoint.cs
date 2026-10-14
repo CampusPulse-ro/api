@@ -21,8 +21,9 @@ public static class MeEndpoint
 
     /// <summary>
     /// The signed-in student, created on their first call (keyed by the token's <c>oid</c>). Later
-    /// calls refresh email and name when they change and the last-seen time at most every few
-    /// minutes. Two first calls at once can't make two rows: the unique index refuses the second
+    /// calls refresh email and name when the token has them and they changed (a token requested
+    /// without the <c>profile</c> scope may lack <c>name</c> and <c>preferred_username</c>), and the
+    /// last-seen time at most every few minutes. Two first calls at once can't make two rows: the unique index refuses the second
     /// insert, which then reads the row the first one made.
     /// </summary>
     internal static async Task<MeResponse> GetMe(ClaimsPrincipal principal, CampusPulseDbContext db,
@@ -30,8 +31,8 @@ public static class MeEndpoint
     {
         var oid = principal.FindFirst("oid")?.Value
             ?? throw new InvalidOperationException("An authenticated principal without oid (the token check should have refused it).");
-        var email = principal.FindFirst("email")?.Value ?? principal.FindFirst("preferred_username")?.Value ?? "";
-        var name = principal.FindFirst("name")?.Value ?? "";
+        var email = FirstNonEmpty(principal, "email", "preferred_username");
+        var name = FirstNonEmpty(principal, "name");
         var now = time.GetUtcNow();
 
         var user = await db.Users.SingleOrDefaultAsync(u => u.EntraObjectId == oid, cancellationToken);
@@ -56,4 +57,7 @@ public static class MeEndpoint
 
         return new MeResponse(user.Id, user.Email, user.DisplayName);
     }
+
+    private static string? FirstNonEmpty(ClaimsPrincipal principal, params string[] claimTypes) =>
+        claimTypes.Select(type => principal.FindFirst(type)?.Value?.Trim()).FirstOrDefault(value => !string.IsNullOrEmpty(value));
 }

@@ -60,7 +60,7 @@ var app = builder.Build();
 if (auth is null && !writingOpenApiDocument)
 {
     app.Logger.LogWarning(
-        "Sign-in is NOT configured (Auth__TenantId, Auth__Audience unset): every endpoint that needs it answers 401.");
+        "Sign-in is NOT configured (Auth__TenantId, Auth__ClientId unset): every endpoint that needs it answers 401.");
 }
 
 // Outermost, so the request's log line and its X-Request-Id cover the exception handler too.
@@ -72,8 +72,9 @@ app.UseAuthorization();
 
 // Served in every environment, not only Development: this document is the contract the
 // mobile and web clients generate their typed API client from, so it has to be reachable
-// on the deployed API too.
-app.MapOpenApi();
+// on the deployed API too. Every endpoint needs sign-in unless it is marked AllowAnonymous (the
+// fallback policy in AuthSetup); these few are public.
+app.MapOpenApi().AllowAnonymous();
 
 // A friendly root, so opening the base URL in a browser shows the API is alive instead of
 // a bare 404, and names the paths a human would look for.
@@ -85,10 +86,12 @@ app.MapGet("/", () => Results.Ok(new
     health = "/health",
     ready = "/health/ready",
 }))
+    .AllowAnonymous()
     .ExcludeFromDescription();
 
 // Liveness only: it does not touch the database, so it answers while Postgres is down.
 app.MapGet("/health", () => Results.Ok(new HealthResponse("ok")))
+    .AllowAnonymous()
     .Produces<HealthResponse>()
     .WithName("GetHealth")
     .WithTags("Health");
@@ -113,6 +116,7 @@ app.MapGet("/health/ready", async (CampusPulseDbContext db, CancellationToken re
             ? Results.Ok(new HealthResponse("ok"))
             : Results.Json(new HealthResponse("unavailable"), statusCode: StatusCodes.Status503ServiceUnavailable);
     })
+    .AllowAnonymous()
     .WithName("GetReadiness")
     .WithTags("Health")
     .Produces<HealthResponse>(StatusCodes.Status200OK)

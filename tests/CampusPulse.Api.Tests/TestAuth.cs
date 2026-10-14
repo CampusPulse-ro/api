@@ -27,7 +27,7 @@ public static class TestAuth
     public static void Configure(IWebHostBuilder builder)
     {
         builder.UseSetting("Auth:TenantId", TenantId);
-        builder.UseSetting("Auth:Audience", $"api://{ClientId}");
+        builder.UseSetting("Auth:ClientId", ClientId);
         builder.ConfigureTestServices(services =>
             services.PostConfigure<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme, options =>
             {
@@ -40,29 +40,47 @@ public static class TestAuth
             }));
     }
 
+    /// <summary>A v2 access token for a UPT member; each argument bends one claim (null leaves it out).</summary>
     public static string Token(
         string? audience = null,
         string? issuer = null,
         string? tenant = null,
-        string scope = "access_as_user",
+        string? scope = "access_as_user",
         string? oid = "oid-ana",
+        string? azp = ClientId,
+        string? idp = null,
+        string[]? roles = null,
         bool expired = false,
         SecurityKey? signWith = null,
-        string email = "ana@student.upt.ro",
-        string name = "Ana Pop")
+        string algorithm = SecurityAlgorithms.RsaSha256,
+        string? email = "ana@student.upt.ro",
+        string? name = "Ana Pop",
+        IReadOnlyDictionary<string, object>? extra = null)
     {
         var now = DateTime.UtcNow;
         var claims = new Dictionary<string, object>
         {
             ["tid"] = tenant ?? TenantId,
-            ["scp"] = scope,
-            ["preferred_username"] = email,
-            ["name"] = name,
             ["ver"] = "2.0",
         };
-        if (oid is not null)
+        void Add(string type, object? value)
         {
-            claims["oid"] = oid;
+            if (value is not null)
+            {
+                claims[type] = value;
+            }
+        }
+
+        Add("scp", scope);
+        Add("oid", oid);
+        Add("azp", azp);
+        Add("idp", idp);
+        Add("roles", roles);
+        Add("preferred_username", email);
+        Add("name", name);
+        foreach (var (type, value) in extra ?? new Dictionary<string, object>())
+        {
+            claims[type] = value;
         }
 
         var descriptor = new SecurityTokenDescriptor
@@ -73,7 +91,7 @@ public static class TestAuth
             IssuedAt = expired ? now.AddHours(-2) : now.AddMinutes(-1),
             NotBefore = expired ? now.AddHours(-2) : now.AddMinutes(-1),
             Expires = expired ? now.AddMinutes(-10) : now.AddHours(1),
-            SigningCredentials = new SigningCredentials(signWith ?? Key, SecurityAlgorithms.RsaSha256),
+            SigningCredentials = new SigningCredentials(signWith ?? Key, algorithm),
         };
         return new JsonWebTokenHandler().CreateToken(descriptor);
     }

@@ -3,7 +3,7 @@ namespace CampusPulse.Domain.Users;
 /// <summary>
 /// A student who has signed in with their UPT Microsoft account at least once. Identified by the
 /// account's Entra object id (<c>oid</c>), which never changes; email and name are refreshed from
-/// the token on sign-in.
+/// the token on sign-in when it carries them.
 /// </summary>
 public sealed class User
 {
@@ -19,7 +19,7 @@ public sealed class User
     {
     }
 
-    public User(string entraObjectId, string email, string displayName, DateTimeOffset now)
+    public User(string entraObjectId, string? email, string? displayName, DateTimeOffset now)
     {
         if (string.IsNullOrWhiteSpace(entraObjectId) || entraObjectId.Length > EntraObjectIdMaxLength)
         {
@@ -46,19 +46,20 @@ public sealed class User
 
     public DateTimeOffset LastSeenAt { get; private set; }
 
-    /// <summary>Records a sign-in. Returns true when something changed and needs saving.</summary>
-    public bool Seen(string email, string displayName, DateTimeOffset now)
+    /// <summary>Records a sign-in. An empty or missing email or name means the token didn't carry
+    /// it, so the stored one is kept. Returns true when something changed and needs saving.</summary>
+    public bool Seen(string? email, string? displayName, DateTimeOffset now)
     {
         var changed = false;
         email = Clamp(email, EmailMaxLength);
         displayName = Clamp(displayName, DisplayNameMaxLength);
-        if (email != Email)
+        if (email.Length > 0 && email != Email)
         {
             Email = email;
             changed = true;
         }
 
-        if (displayName != DisplayName)
+        if (displayName.Length > 0 && displayName != DisplayName)
         {
             DisplayName = displayName;
             changed = true;
