@@ -21,11 +21,20 @@ public static class DependencyInjection
                 "ConnectionStrings__Postgres is not set. See README.md.");
         }
 
-        services.AddDbContext<CampusPulseDbContext>(options => options
-            .UseNpgsql(connectionString)
-            // Postgres convention: snake_case names, so hand-written SQL needs no quoting.
-            .UseSnakeCaseNamingConvention());
+        services.AddDbContext<CampusPulseDbContext>(options => Configure(options, connectionString));
 
         return services;
     }
+
+    /// <summary>
+    /// The one place the context's options are set, shared by the app, the design-time
+    /// factory (migrations) and the tests, so the model EF compares is always the same.
+    /// A null connection string configures Npgsql without one: building the model works,
+    /// and anything that tries to connect fails with a clear error instead of reaching some
+    /// other database.
+    /// </summary>
+    public static DbContextOptionsBuilder Configure(DbContextOptionsBuilder options, string? connectionString) =>
+        (connectionString is null ? options.UseNpgsql() : options.UseNpgsql(connectionString))
+            // Postgres convention: snake_case names, so hand-written SQL needs no quoting.
+            .UseSnakeCaseNamingConvention();
 }
