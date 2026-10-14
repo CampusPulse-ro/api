@@ -68,6 +68,14 @@ public sealed class AuthTests(AuthTests.ConfiguredFactory factory) : IClassFixtu
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
+    [Fact]
+    public async Task Without_a_token_deleting_me_is_401()
+    {
+        var response = await factory.CreateClient().DeleteAsync("/me");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
     [Theory]
     [MemberData(nameof(RefusedTokens))]
     public async Task A_refused_token_is_401(string why, string token)
@@ -125,6 +133,10 @@ public sealed class AuthTests(AuthTests.ConfiguredFactory factory) : IClassFixtu
         Assert.True(me.GetProperty("security")[0].TryGetProperty("Bearer", out _));
         Assert.True(me.GetProperty("responses").TryGetProperty("200", out _));
         Assert.True(me.GetProperty("responses").TryGetProperty("401", out _));
+        var deleteMe = doc.GetProperty("paths").GetProperty("/me").GetProperty("delete");
+        Assert.True(deleteMe.GetProperty("security")[0].TryGetProperty("Bearer", out _));
+        Assert.True(deleteMe.GetProperty("responses").TryGetProperty("204", out _));
+        Assert.True(deleteMe.GetProperty("responses").TryGetProperty("401", out _));
         // Every operation is secured except the anonymous ones, the same rule as the fallback policy.
         foreach (var path in doc.GetProperty("paths").EnumerateObject())
         {
