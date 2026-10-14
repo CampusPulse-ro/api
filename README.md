@@ -200,7 +200,9 @@ clients follow `main`.
 - **Backups:** the production backups dump this database nightly and keep 7 daily, 5 weekly and 12
   monthly copies, plus a weekly copy on a second machine. A deleted account's row therefore
   survives in backups for up to about a year after the delete.
-  - Open: whether to shorten that retention for this database (the owner's decision).
+  - Decided (2026-10-14): retention stays as it is. Where users are told (the deletion page, Play's data
+    safety form): deleted data stays only in the system-wide backups, is never used for anything, and is
+    gone after at most about a year.
 
 ## Push notifications
 
