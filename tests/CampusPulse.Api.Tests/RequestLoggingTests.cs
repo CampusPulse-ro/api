@@ -43,14 +43,20 @@ public sealed class RequestLoggingTests : IDisposable
 {
     private readonly string _logDir = Path.Combine(Path.GetTempPath(), "campuspulse-log-test-" + Guid.NewGuid().ToString("N"));
 
-    private sealed class Factory(CollectingLoggerProvider logs, string? logFile) : WebApplicationFactory<Program>
+    /// <summary>The app with a log collector; <paramref name="debug"/> lowers the default level to Debug,
+    /// otherwise appsettings.json's levels apply, as deployed.</summary>
+    private sealed class Factory(CollectingLoggerProvider logs, string? logFile, bool debug = true) : WebApplicationFactory<Program>
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseEnvironment("Testing");
             builder.UseSetting("ConnectionStrings:Postgres",
                 "Host=127.0.0.1;Port=1;Database=unused;Username=unused;Password=unused;Timeout=2");
-            builder.UseSetting("Logging:LogLevel:Default", "Debug");
+            if (debug)
+            {
+                builder.UseSetting("Logging:LogLevel:Default", "Debug");
+            }
+
             if (logFile is not null)
             {
                 builder.UseSetting("Logging:File:Path", logFile);
@@ -101,7 +107,7 @@ public sealed class RequestLoggingTests : IDisposable
     }
 
     [Fact]
-    public async Task Each_request_is_logged_once_with_its_id_and_health_checks_only_at_debug()
+    public async Task Each_request_is_logged_once_with_its_one_id_and_passing_health_checks_only_at_debug()
     {
         var logs = new CollectingLoggerProvider();
         using var factory = new Factory(logs, null);
@@ -110,15 +116,20 @@ public sealed class RequestLoggingTests : IDisposable
         var root = await client.GetAsync("/?token=secret");
         var id = root.Headers.GetValues(RequestIds.HeaderName).Single();
         await client.GetAsync("/health");
+        // No database behind this factory, so readiness fails: that one must stay visible.
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, (await client.GetAsync("/health/ready")).StatusCode);
 
         var rootLine = Assert.Single(logs.Entries, e => e.Category.EndsWith(nameof(RequestLoggingMiddleware)) && e.Message.Contains("GET / "));
         Assert.Equal(LogLevel.Information, rootLine.Level);
         Assert.Contains("responded 200", rootLine.Message);
         Assert.DoesNotContain("secret", rootLine.Message);   // no query string in logs
-        Assert.Equal(id, rootLine.Scope["RequestId"]);
+        // One RequestId in scope, and it is the returned id (hosting's scope, not a second one).
+        Assert.Equal([id], rootLine.ScopeValues.Where(kv => kv.Key == "RequestId").Select(kv => kv.Value));
 
-        var healthLine = Assert.Single(logs.Entries, e => e.Category.EndsWith(nameof(RequestLoggingMiddleware)) && e.Message.Contains("/health"));
+        var healthLine = Assert.Single(logs.Entries, e => e.Category.EndsWith(nameof(RequestLoggingMiddleware)) && e.Message.Contains("/health responded"));
         Assert.Equal(LogLevel.Debug, healthLine.Level);
+        var readyLine = Assert.Single(logs.Entries, e => e.Category.EndsWith(nameof(RequestLoggingMiddleware)) && e.Message.Contains("/health/ready responded 503"));
+        Assert.Equal(LogLevel.Information, readyLine.Level);
     }
 
     [Fact]
@@ -133,7 +144,8 @@ public sealed class RequestLoggingTests : IDisposable
         Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
         var id = response.Headers.GetValues(RequestIds.HeaderName).Single();
         var problem = await response.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.Equal(id, problem.GetProperty("traceId").GetString());
+        Assert.Equal(id, problem.GetProperty("requestId").GetString());
+        Assert.NotEqual(id, problem.GetProperty("traceId").GetString());   // the default W3C trace id
         Assert.DoesNotContain("boom", problem.ToString());   // no exception details to the client
 
         var error = Assert.Single(logs.Entries, e => e.Exception is InvalidOperationException);
@@ -143,21 +155,54 @@ public sealed class RequestLoggingTests : IDisposable
     }
 
     [Fact]
-    public async Task With_a_file_path_the_events_also_land_in_the_file_as_json_lines()
+    public async Task With_a_file_path_the_events_land_in_the_file_as_json_lines_at_the_configured_levels()
     {
-        Directory.CreateDirectory(_logDir);
-        var file = Path.Combine(_logDir, "api.log");
+        var file = Path.Combine(_logDir, "api.log");   // the folder is created at startup
         string id;
-        using (var factory = new Factory(new CollectingLoggerProvider(), file))
+        using (var factory = new Factory(new CollectingLoggerProvider(), file, debug: false))
         {
-            var response = await factory.CreateClient().GetAsync("/");
+            var client = factory.CreateClient();
+            var response = await client.GetAsync("/?token=secret");
             id = response.Headers.GetValues(RequestIds.HeaderName).Single();
+            await client.GetAsync("/health");
         } // disposing the host flushes the file
 
-        var lines = File.ReadAllLines(Directory.GetFiles(_logDir, "api*.log").Single());
-        var line = Assert.Single(lines, l => l.Contains("HTTP {Method} {Path} responded"));
-        using var json = JsonDocument.Parse(line);
-        Assert.Equal(id, json.RootElement.GetProperty("RequestId").GetString());
+        var text = File.ReadAllText(Directory.GetFiles(_logDir, "api*.log").Single());
+        // The Logging:LogLevel defaults apply to the file too: no hosting request lines (which carry
+        // the query string), no Debug health line.
+        Assert.DoesNotContain("secret", text);
+        Assert.DoesNotContain("/health", text);
+        Assert.DoesNotContain("Microsoft.AspNetCore.Hosting", text);
+        var events = text.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => JsonDocument.Parse(line).RootElement).ToList();
+        var request = Assert.Single(events, e =>
+            e.TryGetProperty("SourceContext", out var c) && c.GetString()!.EndsWith(nameof(RequestLoggingMiddleware)));
+        Assert.Equal(id, request.GetProperty("RequestId").GetString());
+        Assert.Equal("/", request.GetProperty("Path").GetString());
+        Assert.Equal(200, request.GetProperty("StatusCode").GetInt32());
+        Assert.StartsWith("HTTP \"GET\" \"/\" responded 200", request.GetProperty("@m").GetString());
+        Assert.True(request.TryGetProperty("@t", out _));
+    }
+
+    [Fact]
+    public void An_unwritable_log_path_fails_the_start()
+    {
+        Directory.CreateDirectory(_logDir);
+        var notAFolder = Path.Combine(_logDir, "file");
+        File.WriteAllText(notAFolder, "");
+        using var factory = new Factory(new CollectingLoggerProvider(), Path.Combine(notAFolder, "api.log"));
+
+        var error = Assert.ThrowsAny<Exception>(() => factory.CreateClient());
+
+        Assert.Contains(Chain(error), e => e is InvalidOperationException && e.Message.Contains("Logging:File:Path"));
+    }
+
+    private static IEnumerable<Exception> Chain(Exception? e)
+    {
+        for (; e is not null; e = e.InnerException)
+        {
+            yield return e;
+        }
     }
 
     public void Dispose()
@@ -176,8 +221,14 @@ public sealed class CollectingLoggerProvider : ILoggerProvider, ISupportExternal
 
     public List<Entry> Entries { get; } = [];
 
+    /// <summary>A log entry; <see cref="ScopeValues"/> lists every scope value (outermost first),
+    /// <see cref="Scope"/> the same as a dictionary where an inner scope wins.</summary>
     public sealed record Entry(string Category, LogLevel Level, string Message, Exception? Exception,
-        IReadOnlyDictionary<string, object?> Scope);
+        IReadOnlyList<KeyValuePair<string, object?>> ScopeValues)
+    {
+        public IReadOnlyDictionary<string, object?> Scope =>
+            ScopeValues.GroupBy(kv => kv.Key).ToDictionary(g => g.Key, g => g.Last().Value);
+    }
 
     public ILogger CreateLogger(string categoryName) => new Logger(this, categoryName);
 
@@ -196,14 +247,14 @@ public sealed class CollectingLoggerProvider : ILoggerProvider, ISupportExternal
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
             Func<TState, Exception?, string> formatter)
         {
-            var scope = new Dictionary<string, object?>();
+            var scope = new List<KeyValuePair<string, object?>>();
             owner._scopes.ForEachScope((value, acc) =>
             {
                 if (value is IEnumerable<KeyValuePair<string, object>> pairs)
                 {
                     foreach (var (k, v) in pairs)
                     {
-                        acc[k] = v;
+                        acc.Add(new(k, v));
                     }
                 }
             }, scope);

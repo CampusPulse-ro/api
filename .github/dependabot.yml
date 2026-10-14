@@ -3,7 +3,8 @@
 #
 # Minor and patch updates come grouped into one PR per ecosystem. Majors come one PR each, never
 # bundled, and for the packages below they are ignored: they move with the .NET major (net10.0
-# today; the .NET 11 train targets net11.0 only) or break the build (Microsoft.OpenApi 3.x makes
+# today; the .NET 11 train targets net11.0 only; Serilog.Extensions.Logging follows
+# Microsoft.Extensions.Logging's major) or break the build (Microsoft.OpenApi 3.x makes
 # IOpenApiMediaType.Example read-only and the ASP.NET Core 10 XML-comment generator fails; see
 # the pin in CampusPulse.Api.csproj). Minor/patch of those still arrive, e.g. the OpenApi 2.x
 # floor that newer Microsoft.AspNetCore.OpenApi releases need.
@@ -31,6 +32,8 @@ updates:
       - dependency-name: "EFCore.NamingConventions"
         update-types: ["version-update:semver-major"]
       - dependency-name: "dotnet-ef"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "Serilog.Extensions.Logging"
         update-types: ["version-update:semver-major"]
     commit-message:
       prefix: chore

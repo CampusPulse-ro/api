@@ -91,6 +91,12 @@ journalctl -u campuspulse-api-stage -f               # the service's own output
   [`campuspulse-api.service`](campuspulse-api.service) and
   [`campuspulse-api-stage.service`](campuspulse-api-stage.service) in `/etc/systemd/system/`. Each
   stays disabled until its first successful deploy enables it.
+- **The units are installed by hand, like the deploy script; a deploy never touches them.** After
+  changing one, install it again and reload (the new settings apply at the next restart or deploy):
+  `sudo install -m 644 deploy/pi/campuspulse-api{,-stage}.service /etc/systemd/system/ && sudo systemctl daemon-reload`.
+  Their non-secret settings live in the unit (`ASPNETCORE_URLS`, `Logging__File__Path`, which must
+  stay inside the unit's writable `BindPaths` folder or the API refuses to start); secrets stay in the
+  env files.
 - nginx server blocks for both names (DNS: CNAMEs to `thorsp.net`), with a Let's Encrypt certificate.
 - The repo webhook (event `workflow_run`) pointing at pi-control's `/gh/campuspulse-deploy`, with its
   own secret.

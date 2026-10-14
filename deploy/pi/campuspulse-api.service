@@ -18,6 +18,9 @@ EnvironmentFile=/srv/campuspulse/.config/campuspulse/api-prod.env
 Environment=ASPNETCORE_ENVIRONMENT=Production
 Environment=ASPNETCORE_URLS=http://127.0.0.1:5092
 Environment=DOTNET_EnableDiagnostics=0
+# The log file survives reboots (journald here is RAM-only); it must be inside BindPaths below,
+# the only folder this unit can write, or the API refuses to start.
+Environment=Logging__File__Path=/srv/campuspulse/logs/prod/api.log
 # Re-apply the guard on every start (as root, '+'), so a flushed ruleset can't leave the app unguarded.
 ExecStartPre=+/usr/sbin/nft -f /etc/campuspulse/netguard.nft
 ExecStart=/opt/dotnet/dotnet /srv/campuspulse/apps/api-prod/current/CampusPulse.Api.dll

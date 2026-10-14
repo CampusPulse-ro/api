@@ -68,6 +68,18 @@ public sealed class CorsHttpTests
         Assert.False(refused.Headers.Contains("Access-Control-Allow-Origin"));
     }
 
+    [Fact]
+    public async Task An_allowed_origin_can_read_the_request_id()
+    {
+        using var factory = new Factory();
+        var request = new HttpRequestMessage(HttpMethod.Get, "/health");
+        request.Headers.Add("Origin", "https://feat-x.campuspulse-web.pages.dev");
+
+        var response = await factory.CreateClient().SendAsync(request);
+
+        Assert.Contains("X-Request-Id", response.Headers.GetValues("Access-Control-Expose-Headers"));
+    }
+
     private static HttpRequestMessage Preflight(string origin)
     {
         var request = new HttpRequestMessage(HttpMethod.Options, "/health");

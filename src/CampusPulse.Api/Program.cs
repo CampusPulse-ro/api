@@ -31,24 +31,26 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 
 builder.Services.AddOpenApi();
 
-// Unhandled exceptions become a ProblemDetails 500 whose traceId is the request id; the
-// exception itself is logged with its stack trace by the exception handler.
+// Unhandled exceptions become a ProblemDetails 500; the exception itself is logged with its stack
+// trace by the exception handler. Every problem carries requestId (the X-Request-Id, which every
+// log line of the request has as RequestId) besides the default traceId (the W3C trace id, for
+// tracing tools), so a client's error report can be matched to its log lines.
 builder.Services.AddProblemDetails(options => options.CustomizeProblemDetails = context =>
-    // Always the request id (X-Request-Id), never an Activity's W3C id, so a client's error report
-    // matches the log line.
-    context.ProblemDetails.Extensions["traceId"] = context.HttpContext.TraceIdentifier);
+    context.ProblemDetails.Extensions["requestId"] = context.HttpContext.TraceIdentifier);
 
 // The web app calls the API from the browser. Origins per environment: Cors:AllowedOrigins
-// (see CorsOrigins). Bearer tokens, not cookies, so no credentials mode.
+// (see CorsOrigins). Bearer tokens, not cookies, so no credentials mode. X-Request-Id is exposed so
+// the web app can read it (a browser hides non-safelisted response headers from scripts otherwise).
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy => policy
     .SetIsOriginAllowed(origin => CorsOrigins.IsAllowed(origin, allowedOrigins))
     .AllowAnyHeader()
-    .AllowAnyMethod()));
+    .AllowAnyMethod()
+    .WithExposedHeaders(RequestIds.HeaderName)));
 
 var app = builder.Build();
 
-// Outermost, so the request id and the request's log line cover the exception handler too.
+// Outermost, so the request's log line and its X-Request-Id cover the exception handler too.
 app.UseMiddleware<RequestLoggingMiddleware>();
 app.UseExceptionHandler();
 app.UseCors();
