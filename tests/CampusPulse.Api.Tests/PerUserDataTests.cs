@@ -10,8 +10,8 @@ namespace CampusPulse.Api.Tests;
 /// DELETE /me deletes the <c>users</c> row and relies on the database to delete everything under it,
 /// so every foreign key on a path from <c>users</c> (the tables that refer to it, the tables that
 /// refer to those, and so on) must be ON DELETE CASCADE. Checked in the EF model here and in the
-/// migrated database below. Today nothing refers to <c>users</c>; this fails the test run when a
-/// later table (settings, device tokens, Campus Virtual tokens) forgets.
+/// migrated database below: <c>push_devices</c> and, under it, <c>push_receipts_pending</c> today. It
+/// fails the test run when a later table (settings, Campus Virtual tokens) forgets.
 /// </summary>
 public sealed class PerUserDataTests
 {
@@ -57,6 +57,9 @@ public sealed class PerUserDataTests
 
         var walk = WalkFromUsers(db.Model);
 
+        // Every per-user table is reached, at whatever depth (receipts hang off devices).
+        Assert.Contains("push_devices", walk.Reached);
+        Assert.Contains("push_receipts_pending", walk.Reached);
         Assert.True(walk.Offenders.Count == 0,
             "Every foreign key under users must be .OnDelete(DeleteBehavior.Cascade), or DELETE /me leaves "
             + "rows behind: " + string.Join("; ", walk.Offenders));
@@ -204,8 +207,11 @@ public sealed class PerUserDataDatabaseTests(PostgresAppFactory factory) : IClas
     {
         await using var connection = await Open();
 
-        var offenders = (await KeysUnder(connection, "users")).Where(k => k.OnDelete != "c").ToList();
+        var keys = await KeysUnder(connection, "users");
+        var offenders = keys.Where(k => k.OnDelete != "c").ToList();
 
+        Assert.Contains(keys, k => k.Table == "push_devices");
+        Assert.Contains(keys, k => k.Table == "push_receipts_pending");
         Assert.True(offenders.Count == 0, "Not ON DELETE CASCADE: "
             + string.Join("; ", offenders.Select(k => $"{k.Table}.{k.Constraint} ({k.OnDelete})")));
     }
@@ -230,6 +236,8 @@ public sealed class PerUserDataDatabaseTests(PostgresAppFactory factory) : IClas
 
         Assert.Equal(
             [("probe_device_tokens", "a"), ("probe_devices", "c"), ("probe_restricted", "r")],
-            keys.Select(k => (k.Table, k.OnDelete)));
+            keys.Where(k => k.Table.StartsWith("probe_", StringComparison.Ordinal))
+                .OrderBy(k => k.Table, StringComparer.Ordinal)
+                .Select(k => (k.Table, k.OnDelete)));
     }
 }
