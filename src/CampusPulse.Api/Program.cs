@@ -7,7 +7,6 @@ using CampusPulse.Api.Logging;
 using CampusPulse.Api.Push;
 using CampusPulse.Api.Users;
 using CampusPulse.Infrastructure;
-using Microsoft.AspNetCore.DataProtection;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -46,11 +45,6 @@ builder.Services.AddSingleton(TimeProvider.System);
 
 // Push notifications through Expo, and the background check of their receipts (see PushSetup).
 builder.Services.AddCampusPulsePush();
-
-// AddAuthentication registers Data Protection, which nothing here uses: bearer tokens only, no
-// cookies or antiforgery. Ephemeral keys say so, and keep the startup log free of warnings about
-// unpersisted keys. A feature that must read protected data after a restart persists keys first.
-builder.Services.AddDataProtection().UseEphemeralDataProtectionProvider();
 
 // Microsoft sign-in (UPT accounts). Unconfigured, it fails closed: see AuthSetup.
 var auth = builder.Services.AddCampusPulseAuth(builder.Configuration);

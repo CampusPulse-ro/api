@@ -1,7 +1,7 @@
-using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace CampusPulse.Api.Tests;
 
@@ -42,16 +42,18 @@ public sealed class StartupTests
     }
 
     /// <summary>Data Protection comes with AddAuthentication but protects nothing here (bearer tokens
-    /// only), so its keys are ephemeral on purpose. Left to its defaults, a service user with no home
-    /// directory (the Pi's) gets an in-memory key repository and three warnings at every start (#39).
-    /// The warnings themselves can't be reproduced here: a test process has a home directory, so the
-    /// defaults pick a file repository instead. This pins the configuration that avoids them.</summary>
+    /// only). With no home directory (the Pi's service users) it keeps its keys in memory and warns
+    /// about that at every start (#39). Its category logs from Error up; everything else keeps its
+    /// level. The warnings themselves can't be reproduced here: a test process has a home directory.</summary>
     [Fact]
-    public async Task Data_Protection_is_ephemeral_by_design()
+    public void Data_Protection_logs_only_errors()
     {
         using var factory = new SignInFactory();
-        await factory.CreateClient().GetAsync("/health");
+        var loggers = factory.Services.GetRequiredService<ILoggerFactory>();
 
-        Assert.IsType<EphemeralDataProtectionProvider>(factory.Services.GetRequiredService<IDataProtectionProvider>());
+        var keyManager = loggers.CreateLogger("Microsoft.AspNetCore.DataProtection.KeyManagement.XmlKeyManager");
+        Assert.False(keyManager.IsEnabled(LogLevel.Warning));
+        Assert.True(keyManager.IsEnabled(LogLevel.Error));
+        Assert.True(loggers.CreateLogger("Microsoft.AspNetCore.Hosting.Diagnostics").IsEnabled(LogLevel.Warning));
     }
 }
