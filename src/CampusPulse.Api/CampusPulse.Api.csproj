@@ -49,6 +49,9 @@
          patched 2.x release. Do NOT jump to 3.x: it makes IOpenApiMediaType.Example read-only
          and the ASP.NET Core 10 XML-comment source generator fails to compile. -->
     <PackageReference Include="Microsoft.OpenApi" Version="2.7.5" />
+    <PackageReference Include="Serilog.Extensions.Logging" Version="10.0.0" />
+    <PackageReference Include="Serilog.Formatting.Compact" Version="3.0.0" />
+    <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
   </ItemGroup>
 
   <ItemGroup>

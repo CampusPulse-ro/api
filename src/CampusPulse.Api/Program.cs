@@ -1,9 +1,17 @@
 using System.Reflection;
 using System.Text.Json.Serialization;
 using CampusPulse.Api;
+using CampusPulse.Api.Logging;
 using CampusPulse.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// JSON logs to stdout, and to a rolling file when Logging:File:Path is set (see LoggingSetup).
+builder.AddCampusPulseLogging();
+
+// Optional error reporting (not enabled; his decision, CampusPulse-ro/api#10): Sentry would be
+// `builder.WebHost.UseSentry(o => o.Dsn = builder.Configuration["Sentry:Dsn"])` with the DSN in the
+// env file, plus an allow rule for its host in the Pi's network guard (deploy/pi/netguard.nft).
 
 // The build writes openapi/v1.json by running this file through GetDocument.Insider, with no
 // configuration and no database. The context is registered the same way there, just without
@@ -23,16 +31,28 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 
 builder.Services.AddOpenApi();
 
+// Unhandled exceptions become a ProblemDetails 500; the exception itself is logged with its stack
+// trace by the exception handler. Every problem carries requestId (the X-Request-Id, which every
+// log line of the request has as RequestId) besides the default traceId (the W3C trace id, for
+// tracing tools), so a client's error report can be matched to its log lines.
+builder.Services.AddProblemDetails(options => options.CustomizeProblemDetails = context =>
+    context.ProblemDetails.Extensions["requestId"] = context.HttpContext.TraceIdentifier);
+
 // The web app calls the API from the browser. Origins per environment: Cors:AllowedOrigins
-// (see CorsOrigins). Bearer tokens, not cookies, so no credentials mode.
+// (see CorsOrigins). Bearer tokens, not cookies, so no credentials mode. X-Request-Id is exposed so
+// the web app can read it (a browser hides non-safelisted response headers from scripts otherwise).
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy => policy
     .SetIsOriginAllowed(origin => CorsOrigins.IsAllowed(origin, allowedOrigins))
     .AllowAnyHeader()
-    .AllowAnyMethod()));
+    .AllowAnyMethod()
+    .WithExposedHeaders(RequestIds.HeaderName)));
 
 var app = builder.Build();
 
+// Outermost, so the request's log line and its X-Request-Id cover the exception handler too.
+app.UseMiddleware<RequestLoggingMiddleware>();
+app.UseExceptionHandler();
 app.UseCors();
 
 // Served in every environment, not only Development: this document is the contract the

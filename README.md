@@ -26,6 +26,10 @@ Environment variables only:
 |---|---|
 | `ConnectionStrings__Postgres` | Npgsql connection string. Required: startup fails fast without it. The database does not have to be reachable for the API to start. |
 | `Cors__AllowedOrigins__<n>` | browser origins allowed to call the API; `https://*.example.com` allows any subdomain (Cloudflare PR previews). None set = no browser origin allowed |
+| `Logging__File__Path` | also write the logs to this file (see [Logs](#logs)). Unset = stdout only. If set and the file can't be written, startup fails |
+| `Logging__File__FileSizeLimitBytes` | roll the file at this size; default 10485760 (10 MB) |
+| `Logging__File__RetainedFileCountLimit` | files kept, the live one included; default 10 |
+| `Logging__LogLevel__<category>` | the usual .NET log levels, for stdout and the file alike; defaults in `appsettings.json` (Information, `Microsoft.AspNetCore` at Warning) |
 
 ## Running it
 
@@ -103,6 +107,37 @@ dotnet ef migrations add <Name> --project src/CampusPulse.Infrastructure --start
   `campuspulse-efbundle`). Each deploy runs it against its environment's database, with the
   connection string from the environment (never in argv), before the new release goes live,
   so the Pi needs neither the SDK nor `dotnet-ef`.
+
+## Logs
+
+- **Stdout:** .NET's JSON console lines (journald on the Pi): UTC `Timestamp`, `LogLevel`,
+  `Category`, `Message`, and `Scopes`, where every line logged during a request has its `RequestId`.
+- **File:** when `Logging__File__Path` is set (the Pi's units set
+  `/srv/campuspulse/logs/<env>/api.log`, the only folder the service can write), the same events
+  also go to a file, at the same levels. It rolls at 10 MB and keeps 10 files: `api.log` first, then
+  `api_001.log`, `api_002.log`… (the newest is the highest number; the oldest is deleted). The Pi's
+  journald keeps logs in RAM only, so the file is what survives a reboot. Locally it's off unless
+  you set it. Lines are Serilog's rendered compact JSON: `@t` (UTC time), `@m` (the message, with
+  string values in quotes: `HTTP "GET" "/" responded 200 in 3.1 ms`), `@l`
+  (the level, left out at Information), `@x` (an exception with its stack), `@i` (an id of the
+  message template), then the event's properties (`RequestId`, `SourceContext` = the category,
+  `StatusCode`…).
+- **One line per request:** method, path (never the query string), status and duration. A passing
+  `/health*` check (status below 400) is logged at Debug, since deploys and monitoring call them
+  constantly; a failing one (a 503 readiness) at Information like any other request.
+- **Request id:** a caller's `X-Request-Id` is kept if it's 1–64 characters of letters, digits,
+  `.`, `_`, `-` or `:`; otherwise a new one is made. It is the request's `TraceIdentifier`, returned
+  in `X-Request-Id` on every response (exposed to browser scripts through CORS), so a client's bug
+  report can be matched to its log lines.
+- **Errors:** an unhandled exception returns a ProblemDetails 500 with no exception details, whose
+  `requestId` is the request id (and `traceId` the W3C trace id, for tracing tools); the exception
+  and its stack trace are logged at Error.
+- **Reading them on the Pi:** `journalctl -u campuspulse-api-stage -o cat | jq`, or the file, which
+  follows the newest one:
+  `sudo sh -c 'tail -F "$(ls -t /srv/campuspulse/logs/stage/api*.log | head -1)"' | jq -c '[."@t", ."@l", ."@m", .RequestId]'`.
+  Look one request up with `sudo grep -h '"RequestId":"<id>"' /srv/campuspulse/logs/stage/api*.log | jq`.
+- **Error reporting (Sentry):** not enabled. `Program.cs` marks where it would go; it would also need
+  an allow rule in the Pi's network guard.
 
 ## Tests
 
