@@ -4,9 +4,9 @@ using Microsoft.AspNetCore.Mvc.Testing;
 namespace CampusPulse.Api.Tests;
 
 /// <summary>
-/// Hosts the real app in-process. No database yet: registering the DbContext opens no
-/// connection, so a placeholder connection string is enough for endpoints that never query.
-/// Switch to a real Postgres (as amicus-api does) once a test touches the database.
+/// Hosts the real app in-process. Registering the DbContext opens no connection, so a
+/// placeholder connection string is enough for endpoints that never query. Tests that need
+/// the database are marked [PostgresFact] and get a real server (see PostgresFactAttribute).
 /// </summary>
 public sealed class CampusPulseAppFactory : WebApplicationFactory<Program>
 {
@@ -16,7 +16,9 @@ public sealed class CampusPulseAppFactory : WebApplicationFactory<Program>
 
         // UseSetting, not ConfigureAppConfiguration: under minimal hosting Program.cs reads
         // builder.Configuration before the factory's configuration delegates run.
+        // Port 1 on loopback: nothing listens there, so a connection attempt is refused at once
+        // (never another project's database on a developer machine).
         builder.UseSetting("ConnectionStrings:Postgres",
-            "Host=localhost;Database=unused;Username=unused;Password=unused");
+            "Host=127.0.0.1;Port=1;Database=unused;Username=unused;Password=unused;Timeout=2");
     }
 }

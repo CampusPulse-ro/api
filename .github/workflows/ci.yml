@@ -17,8 +17,24 @@ jobs:
   build-and-test:
     name: build & test
     runs-on: ubuntu-latest
-    # No Postgres service yet: no test touches the database. Add one (as amicus-api has)
-    # with the first test that does; an in-memory provider would not enforce Postgres rules.
+    # A real Postgres for the tests marked [PostgresFact] (migrations, and later anything that
+    # queries): an in-memory provider would not enforce Postgres rules. Each test creates its
+    # own database on this server.
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CAMPUSPULSE_TEST_DB: Host=localhost;Port=5432;Username=postgres;Password=postgres
     steps:
       - uses: actions/checkout@v7
 
@@ -27,6 +43,8 @@ jobs:
           dotnet-version: '10.0.x'
 
       - run: dotnet restore
+
+      - run: dotnet tool restore
 
       # Formatting and code style per .editorconfig, before Build so a style problem shows up as
       # a format diff rather than a compiler error. Fix locally with `dotnet format`.
@@ -38,6 +56,13 @@ jobs:
       # overnight through no fault of the change.
       - name: Build
         run: dotnet build --no-restore -c Release -warnaserror -warnnotaserror:NU1901,NU1902,NU1903,NU1904
+
+      # A model change without its migration fails here, not at the next deploy. In dotnet ef,
+      # `-c` is --context, not the configuration.
+      - name: Pending model changes
+        run: >
+          dotnet ef migrations has-pending-model-changes --no-build --configuration Release
+          --project src/CampusPulse.Infrastructure --startup-project src/CampusPulse.Api
 
       - name: Test
         run: dotnet test --no-build -c Release
@@ -61,6 +86,24 @@ jobs:
         with:
           name: campuspulse-api
           path: publish
+          retention-days: 14
+
+      # The migrations bundle the Pi deploy runs before switching releases: one self-contained
+      # linux-arm64 executable, so the Pi needs neither the SDK nor dotnet-ef. It reads
+      # ConnectionStrings__Postgres from the environment (DesignTimeDbContextFactory), so the
+      # deploy runs `./efbundle` with no password in argv. Artifact `campuspulse-efbundle`,
+      # file `efbundle`: deploy/pi/campuspulse-deploy depends on both names.
+      - run: dotnet tool restore
+
+      - name: Migrations bundle (linux-arm64)
+        run: >
+          dotnet ef migrations bundle --self-contained -r linux-arm64 -o efbundle-out/efbundle --force
+          --project src/CampusPulse.Infrastructure --startup-project src/CampusPulse.Api
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: campuspulse-efbundle
+          path: efbundle-out/efbundle
           retention-days: 14
 
   container:

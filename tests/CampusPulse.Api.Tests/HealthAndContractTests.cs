@@ -26,5 +26,9 @@ public sealed class HealthAndContractTests(CampusPulseAppFactory factory)
         var doc = await response.Content.ReadFromJsonAsync<JsonElement>();
         Assert.StartsWith("3.", doc.GetProperty("openapi").GetString());
         Assert.True(doc.GetProperty("paths").TryGetProperty("/health", out _));
+        Assert.True(doc.GetProperty("paths").TryGetProperty("/health/ready", out var ready));
+        var responses = ready.GetProperty("get").GetProperty("responses");
+        Assert.True(responses.TryGetProperty("200", out _));
+        Assert.True(responses.TryGetProperty("503", out _));
     }
 }
