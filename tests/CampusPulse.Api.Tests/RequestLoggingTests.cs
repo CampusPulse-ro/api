@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using CampusPulse.Api.Logging;
@@ -8,6 +9,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Serilog.Extensions.Logging;
 
 namespace CampusPulse.Api.Tests;
 
@@ -61,6 +63,9 @@ public sealed class RequestLoggingTests : IDisposable
             {
                 builder.UseSetting("Logging:File:Path", logFile);
             }
+
+            // Sign-in on, so the throwing route (which the fallback policy protects) can be reached.
+            TestAuth.Configure(builder);
 
             builder.ConfigureTestServices(services =>
             {
@@ -138,7 +143,9 @@ public sealed class RequestLoggingTests : IDisposable
         var logs = new CollectingLoggerProvider();
         using var factory = new Factory(logs, null);
 
-        var response = await factory.CreateClient().GetAsync("/__throw");
+        var request = new HttpRequestMessage(HttpMethod.Get, "/__throw");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", TestAuth.Token());
+        var response = await factory.CreateClient().SendAsync(request);
 
         Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
         Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
@@ -159,13 +166,20 @@ public sealed class RequestLoggingTests : IDisposable
     {
         var file = Path.Combine(_logDir, "api.log");   // the folder is created at startup
         string id;
+        SerilogLoggerProvider fileProvider;
         using (var factory = new Factory(new CollectingLoggerProvider(), file, debug: false))
         {
             var client = factory.CreateClient();
             var response = await client.GetAsync("/?token=secret");
             id = response.Headers.GetValues(RequestIds.HeaderName).Single();
             await client.GetAsync("/health");
-        } // disposing the host flushes the file
+            fileProvider = factory.Services.GetServices<ILoggerProvider>().OfType<SerilogLoggerProvider>().Single();
+        }
+
+        // The factory's Dispose only tells the app to stop; the app disposes its services (and so
+        // closes the file) on its own thread, possibly after Dispose returned. Disposing the provider
+        // here waits until the file is flushed and closed.
+        fileProvider.Dispose();
 
         var text = File.ReadAllText(Directory.GetFiles(_logDir, "api*.log").Single());
         // The Logging:LogLevel defaults apply to the file too: no hosting request lines (which carry

@@ -54,6 +54,34 @@
           }
         }
       }
+    },
+    "/me": {
+      "get": {
+        "tags": [
+          "Users"
+        ],
+        "operationId": "GetMe",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -68,12 +96,43 @@
             "type": "string"
           }
         }
+      },
+      "MeResponse": {
+        "required": [
+          "id",
+          "email",
+          "displayName"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "email": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "Bearer": {
+        "type": "http",
+        "description": "A Microsoft access token for a UPT account, for this API's access_as_user scope.",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
       }
     }
   },
   "tags": [
     {
       "name": "Health"
+    },
+    {
+      "name": "Users"
     }
   ]
 }

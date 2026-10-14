@@ -52,6 +52,7 @@ public sealed class PostgresAppFactory : WebApplicationFactory<Program>, IAsyncL
         builder.UseEnvironment("Testing");
         builder.UseSetting("ConnectionStrings:Postgres", ConnectionString
             ?? throw new InvalidOperationException("No test database: the test should have been skipped."));
+        TestAuth.Configure(builder);
     }
 
     async Task IAsyncLifetime.DisposeAsync()
