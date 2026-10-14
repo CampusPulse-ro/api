@@ -1,7 +1,9 @@
 using System.Reflection;
 using System.Text.Json.Serialization;
 using CampusPulse.Api;
+using CampusPulse.Api.Auth;
 using CampusPulse.Api.Logging;
+using CampusPulse.Api.Users;
 using CampusPulse.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -29,7 +31,12 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
 });
 
-builder.Services.AddOpenApi();
+builder.Services.AddOpenApi(options => options.AddBearerSecurity());
+
+builder.Services.AddSingleton(TimeProvider.System);
+
+// Microsoft sign-in (UPT accounts). Unconfigured, it fails closed: see AuthSetup.
+var auth = builder.Services.AddCampusPulseAuth(builder.Configuration);
 
 // Unhandled exceptions become a ProblemDetails 500; the exception itself is logged with its stack
 // trace by the exception handler. Every problem carries requestId (the X-Request-Id, which every
@@ -50,10 +57,18 @@ builder.Services.AddCors(options => options.AddDefaultPolicy(policy => policy
 
 var app = builder.Build();
 
+if (auth is null && !writingOpenApiDocument)
+{
+    app.Logger.LogWarning(
+        "Sign-in is NOT configured (Auth__TenantId, Auth__Audience unset): every endpoint that needs it answers 401.");
+}
+
 // Outermost, so the request's log line and its X-Request-Id cover the exception handler too.
 app.UseMiddleware<RequestLoggingMiddleware>();
 app.UseExceptionHandler();
 app.UseCors();
+app.UseAuthentication();
+app.UseAuthorization();
 
 // Served in every environment, not only Development: this document is the contract the
 // mobile and web clients generate their typed API client from, so it has to be reachable
@@ -102,6 +117,8 @@ app.MapGet("/health/ready", async (CampusPulseDbContext db, CancellationToken re
     .WithTags("Health")
     .Produces<HealthResponse>(StatusCodes.Status200OK)
     .Produces<HealthResponse>(StatusCodes.Status503ServiceUnavailable);
+
+app.MapMe();
 
 app.Run();
 

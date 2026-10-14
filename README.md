@@ -30,6 +30,48 @@ Environment variables only:
 | `Logging__File__FileSizeLimitBytes` | roll the file at this size; default 10485760 (10 MB) |
 | `Logging__File__RetainedFileCountLimit` | files kept, the live one included; default 10 |
 | `Logging__LogLevel__<category>` | the usual .NET log levels, for stdout and the file alike; defaults in `appsettings.json` (Information, `Microsoft.AspNetCore` at Warning) |
+| `Auth__TenantId` | UPT's Entra tenant id (`6bb41fe4-40a3-4a10-b6cd-38278e78b21a`). With `Auth__Audience` unset too, sign-in is off and every endpoint that needs it answers 401 (see Sign-in) |
+| `Auth__Audience` | the app registration's client id, or `api://<client-id>` (both forms are accepted) |
+
+## Sign-in
+
+Students sign in with their UPT Microsoft account. The clients (MSAL in web, expo-auth-session in
+mobile) get an access token for this API from UPT's tenant and send it as
+`Authorization: Bearer …`. The API accepts a token only if it:
+
+- is signed by Microsoft (keys from the tenant's metadata);
+- has the issuer `https://login.microsoftonline.com/<tenant>/v2.0` exactly (v2 tokens; see below);
+- has an audience of this API's client id or `api://<client-id>`;
+- has `tid` equal to the tenant and `access_as_user` in `scp`;
+- has an `oid` and hasn't expired.
+
+Anything else is 401.
+
+- `GET /me` returns the signed-in student `{ id, email, displayName }`. The first call creates the
+  student (keyed by `oid`), and later calls refresh email and name. `/health*` need no token.
+- **Unconfigured** (no `Auth__TenantId` / `Auth__Audience`): the API still starts and logs a
+  warning, and every endpoint that needs sign-in answers 401. It never lets a request through
+  anonymously.
+
+**Registering the app (once, by Sebastian, signed in with his `@student.upt.ro` account):** a test
+on 2026-10-14 showed UPT lets students register apps and consent to their own organisation's apps.
+
+1. entra.microsoft.com → App registrations → New registration: name `CampusPulse`, **single tenant**
+   (UPT accounts only).
+2. **Authentication:**
+   - Single-page application redirect URIs: `http://localhost:5173`,
+     `https://staging.campuspulse-web.pages.dev` and `https://campuspulse.thorsp.net`.
+   - Mobile and desktop applications: `campuspulse://auth`.
+   - PR previews (`pr-<n>.campuspulse-web.pages.dev`) can't be registered one by one, so they can't
+     sign in.
+3. **Expose an API:** set the Application ID URI to the default `api://<client-id>`, and add the
+   scope `access_as_user` (who can consent: admins and users).
+4. **Manifest:** set `"requestedAccessTokenVersion": 2` (in `api`). Without it Entra issues v1
+   tokens, whose issuer is `https://sts.windows.net/<tenant>/`, and the API refuses them.
+5. **On the Pi:** add `Auth__TenantId=6bb41fe4-40a3-4a10-b6cd-38278e78b21a` and
+   `Auth__Audience=api://<client-id>` to both env files
+   (`/srv/campuspulse/.config/campuspulse/api-{stage,prod}.env`), then restart the services. The
+   client id isn't a secret.
 
 ## Running it
 
