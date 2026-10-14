@@ -1,9 +1,26 @@
+using System.Reflection;
+using System.Text.Json.Serialization;
 using CampusPulse.Api;
 using CampusPulse.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddCampusPulsePersistence(builder.Configuration);
+// The build writes openapi/v1.json by running this file through GetDocument.Insider, with no
+// configuration and no database. The context is registered the same way there, just without
+// the fail-fast check; every real start still fails fast without a connection string.
+var writingOpenApiDocument = Assembly.GetEntryAssembly()?.GetName().Name == "GetDocument.Insider";
+builder.Services.AddCampusPulsePersistence(builder.Configuration,
+    requireConnectionString: !writingOpenApiDocument);
+
+// JSON shapes the OpenAPI document (and so the generated TypeScript types) describes: integers
+// as numbers only (without Strict, .NET writes them as ["integer","string"] → `number | string`),
+// enums as their names (string unions in TypeScript).
+builder.Services.ConfigureHttpJsonOptions(options =>
+{
+    options.SerializerOptions.NumberHandling = JsonNumberHandling.Strict;
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
+});
+
 builder.Services.AddOpenApi();
 
 // The web app calls the API from the browser. Origins per environment: Cors:AllowedOrigins
@@ -37,6 +54,7 @@ app.MapGet("/", () => Results.Ok(new
 
 // Liveness only: it does not touch the database, so it answers while Postgres is down.
 app.MapGet("/health", () => Results.Ok(new HealthResponse("ok")))
+    .Produces<HealthResponse>()
     .WithName("GetHealth")
     .WithTags("Health");
 
