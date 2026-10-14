@@ -45,7 +45,18 @@ campuspulse-deploy rollback stage                    # back to the healthy relea
 campuspulse-deploy stage <ci-run-id> <sha> --force   # deploy a green main run that isn't the tip
 campuspulse-deploy prod <release-run-id> vX.Y.Z --force  # redeploy an older release
 journalctl -u campuspulse-api-stage -f               # the service's own output
+campuspulse-import-timetable stage --overrides overrides.yaml --dry-run Timetable*.xlsx  # the timetable import
 ```
+
+- **The timetable import** ([`campuspulse-import-timetable`](campuspulse-import-timetable),
+  [docs/timetable-import.md](../../docs/timetable-import.md)) runs `CampusPulse.Api import-timetable`
+  from the environment's live release, as a sandboxed one-off unit under its user with its env file,
+  like the migrations. The workbooks and the overrides file go into a private folder for the run and
+  are deleted after it. Installed by hand like the deploy script:
+  `sudo install -m 755 deploy/pi/campuspulse-import-timetable /usr/local/bin/campuspulse-import-timetable`.
+  Always `--dry-run` first. Exit 2 means refused, nothing written: students would lose a group, a
+  chosen subject or a picked slot, or a listed sheet is missing (the output counts them). Re-run with
+  `--force` once that's intended.
 
 - **A rollback restores code, not schema.** Migrations must keep working with the previous release:
   expand first (add), contract in a later release (remove). See the main README.

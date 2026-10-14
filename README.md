@@ -182,6 +182,17 @@ clients follow `main`.
   registration (see [Push notifications](#push-notifications)). `push_receipts_pending`: tickets of
   sent notifications whose receipt hasn't been read yet, under their device. Both are in the cascade
   tree: `users` → `push_devices` → `push_receipts_pending`.
+- The timetable (see [Timetable](#timetable)): `semesters` (with `teaching_weeks` and
+  `non_teaching_days`), `programmes`, `study_groups`, `rooms`, `subjects`, `timetable_slots` (with
+  `timetable_slot_groups`), `offered_slots`, `timetable_notes` and `timetable_import_runs`. Written by
+  the import only. A student's own rows are `student_settings` (their study group) and
+  `student_subjects` (optional subjects and picked offers), both in the cascade tree under `users`.
+  - The import never deletes a study group or a subject. One a newer workbook no longer has is
+    *retired* (`retired_at`), so the student's row keeps pointing at it, shown as "no longer offered".
+  - It does delete offered slots that changed or went: `student_subjects.offered_slot_id` is `SET NULL`,
+    so that clears the pick, not the choice.
+  - `student_settings.study_group_id` is `SET NULL` and `student_subjects.subject_id` is `CASCADE`. Those
+    only matter if a group or subject row is ever deleted by hand.
 - `account_deletion_counts`: the number of accounts deleted per UTC day, added to in the same
   transaction as the delete. It holds no identifier. The deletion's log line (`Account deleted`)
   names no one either, but like every line of the request it carries the request's scope: request
@@ -251,6 +262,38 @@ default. So on the Pi it goes through the egress proxy, whose allow list has `ex
 Firebase Cloud Messaging, so an FCM V1 service account key has to be uploaded to EAS for the app's
 Android credentials (`eas credentials`). Sebastian does that. Until then Expo can't deliver to
 Android: expect an `InvalidCredentials` error on the ticket or on its receipt, in the logs.
+
+## Timetable
+
+The AC faculty's timetable for a semester (CampusPulse-ro/api#5), loaded by a one-off import:
+[docs/timetable-import.md](docs/timetable-import.md). Every endpoint needs sign-in: the faculty shares
+these files with UPT accounts only. Dates are Romanian dates. The API expands the weekly slots into
+dates itself (teaching weeks, the break, non-teaching days, each slot's weeks), so no client handles
+week parity.
+
+- `GET /semesters/current`: the teaching weeks with their dates, non-teaching days, today and its
+  teaching week.
+- `GET /timetable/programmes`: programmes → years → study groups, to pick a group from.
+- `GET /me/settings` / `PUT /me/settings` `{ studyGroupId }` (null clears it): the student's group.
+  400 for a group that doesn't exist, 404 without an account.
+- `GET /timetable/groups/{id}/choices`: the subjects of that group's year a student chooses, each
+  with the slots it's offered at:
+  - `optional` (opt in, then pick a slot);
+  - `pickSlot` (everyone has it, at a time they pick: most master labs).
+- `GET /me/subjects`, `PUT /me/subjects/{subjectId}` `{ offeredSlotId }` (null: taking it, no slot
+  picked yet), `DELETE /me/subjects/{subjectId}`. 400 for a subject with nothing to choose or an
+  offer of another subject.
+- `GET /me/timetable?from=&to=`: the student's classes, both dates included, at most 31 days,
+  defaulting to today. That's their group's classes, minus optional subjects they didn't choose,
+  plus the offered slots they picked; plus the notes of their year (sport, tutoring hours, rotas
+  written out).
+- `GET /timetable/groups/{id}?from=&to=`: a group's classes, optional subjects included (`optional`).
+- `GET /rooms`, `GET /rooms/{code}/timetable?date=`: everything in a room on a date, grid slots and
+  offered slots.
+
+Clients: read the student's group from `GET /me/settings` after `POST /me`. With no group, send them to
+the picker. With `noLongerOffered` (a newer timetable doesn't have it) or `fromAnotherSemester` (a new
+semester was imported), ask them to pick again. A chosen subject with `noLongerOffered` is shown as such.
 
 ## Database migrations
 

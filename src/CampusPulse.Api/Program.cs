@@ -5,8 +5,18 @@ using CampusPulse.Api;
 using CampusPulse.Api.Auth;
 using CampusPulse.Api.Logging;
 using CampusPulse.Api.Push;
+using CampusPulse.Api.Timetable;
+using CampusPulse.Api.Timetable.Import;
 using CampusPulse.Api.Users;
 using CampusPulse.Infrastructure;
+
+// The one-off timetable import (CampusPulse-ro/api#5) is a mode of this same binary, so the Pi runs it
+// from the deployed release like the migrations: `CampusPulse.Api import-timetable …`. It never starts
+// the web app.
+if (args is [ImportTimetableCommand.Name, .. var importArgs])
+{
+    return await ImportTimetableCommand.RunAsync(importArgs, Console.Out, Console.Error);
+}
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -155,8 +165,10 @@ app.MapGet("/health/ready", async (CampusPulseDbContext db, CancellationToken re
 
 app.MapMe();
 app.MapPush();
+app.MapTimetable();
 
 app.Run();
+return 0;
 
 /// <summary>Body of <c>GET /health</c> and <c>GET /health/ready</c>: <c>ok</c> or <c>unavailable</c>.</summary>
 public sealed record HealthResponse(string Status);

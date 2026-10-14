@@ -10,8 +10,9 @@ namespace CampusPulse.Api.Tests;
 /// DELETE /me deletes the <c>users</c> row and relies on the database to delete everything under it,
 /// so every foreign key on a path from <c>users</c> (the tables that refer to it, the tables that
 /// refer to those, and so on) must be ON DELETE CASCADE. Checked in the EF model here and in the
-/// migrated database below: <c>push_devices</c> and, under it, <c>push_receipts_pending</c> today. It
-/// fails the test run when a later table (settings, Campus Virtual tokens) forgets.
+/// migrated database below: <c>push_devices</c> and, under it, <c>push_receipts_pending</c>, and the
+/// timetable's <c>student_settings</c> and <c>student_subjects</c>. It fails the test run when a later
+/// table (Campus Virtual tokens) forgets.
 /// </summary>
 public sealed class PerUserDataTests
 {
@@ -60,6 +61,8 @@ public sealed class PerUserDataTests
         // Every per-user table is reached, at whatever depth (receipts hang off devices).
         Assert.Contains("push_devices", walk.Reached);
         Assert.Contains("push_receipts_pending", walk.Reached);
+        Assert.Contains("student_settings", walk.Reached);
+        Assert.Contains("student_subjects", walk.Reached);
         Assert.True(walk.Offenders.Count == 0,
             "Every foreign key under users must be .OnDelete(DeleteBehavior.Cascade), or DELETE /me leaves "
             + "rows behind: " + string.Join("; ", walk.Offenders));
@@ -212,6 +215,8 @@ public sealed class PerUserDataDatabaseTests(PostgresAppFactory factory) : IClas
 
         Assert.Contains(keys, k => k.Table == "push_devices");
         Assert.Contains(keys, k => k.Table == "push_receipts_pending");
+        Assert.Contains(keys, k => k.Table == "student_settings");
+        Assert.Contains(keys, k => k.Table == "student_subjects");
         Assert.True(offenders.Count == 0, "Not ON DELETE CASCADE: "
             + string.Join("; ", offenders.Select(k => $"{k.Table}.{k.Constraint} ({k.OnDelete})")));
     }
