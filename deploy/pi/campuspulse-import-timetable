@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# The one-off timetable import (CampusPulse-ro/api#5) on the Pi, for one environment, with the release
+# that environment runs: `CampusPulse.Api import-timetable`, as a sandboxed one-off unit under the
+# environment's user with its env file (the database), the way campuspulse-deploy runs migrations.
+# Nothing runs it automatically. The workbooks and the overrides file are copied into a private
+# temporary folder for the run and deleted after it.
+#
+#   campuspulse-import-timetable stage|prod --overrides FILE [--dry-run | --parse-only] [--force] WORKBOOK.xlsx…
+#
+# Run --dry-run first and read every change and warning. Installed by hand, like the deploy script:
+#   sudo install -m 755 deploy/pi/campuspulse-import-timetable /usr/local/bin/campuspulse-import-timetable
+# Exit codes: the import's (0 done or nothing to do, 1 failed, 64 usage).
+set -euo pipefail
+
+ROOT=/srv/campuspulse
+usage() {
+  echo "usage: campuspulse-import-timetable stage|prod --overrides FILE [--dry-run | --parse-only] [--force] WORKBOOK.xlsx…" >&2
+  exit 64
+}
+
+[ $# -ge 1 ] || usage
+env=$1
+shift
+case "$env" in
+  stage | prod) ;;
+  *) usage ;;
+esac
+user=campuspulse-$env
+base=$ROOT/apps/api-$env
+envfile=$ROOT/.config/campuspulse/api-$env.env
+[ -e "$base/current/CampusPulse.Api.dll" ] || { echo "no release at $base/current" >&2; exit 1; }
+
+overrides=""
+flags=()
+workbooks=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --overrides) [ $# -ge 2 ] || usage; overrides=$2; shift 2 ;;
+    --dry-run | --parse-only | --force) flags+=("$1"); shift ;;
+    --*) usage ;;
+    *) workbooks+=("$1"); shift ;;
+  esac
+done
+[ -n "$overrides" ] && [ ${#workbooks[@]} -gt 0 ] || usage
+
+# The environment's user can't read the caller's files: copy them (keeping their names, which identify
+# what each file contributes) into a folder only root and that user can read.
+tmp=$(sudo mktemp -d /run/campuspulse-import-XXXXXX)
+trap 'sudo rm -rf -- "$tmp"' EXIT
+sudo install -m 640 -g "$user" -- "$overrides" "$tmp/overrides.yaml"
+args=(--overrides "$tmp/overrides.yaml" "${flags[@]}")
+for workbook in "${workbooks[@]}"; do
+  sudo install -m 640 -g "$user" -- "$workbook" "$tmp/$(basename -- "$workbook")"
+  args+=("$tmp/$(basename -- "$workbook")")
+done
+sudo chgrp "$user" "$tmp"
+sudo chmod 750 "$tmp"
+
+# Build code runs only under the network guard (deploy/pi/README.md).
+sudo nft -f /etc/campuspulse/netguard.nft
+
+sudo systemd-run --quiet --wait --pipe --collect \
+  --unit="campuspulse-import-$env-$$" \
+  -p User="$user" -p Group="$user" \
+  -p EnvironmentFile="$envfile" -p WorkingDirectory="$base/current" \
+  -p "TemporaryFileSystem=/srv:ro /mnt:ro /nas:ro" -p BindReadOnlyPaths="$base $tmp" \
+  -p NoNewPrivileges=yes -p PrivateTmp=yes -p PrivateDevices=yes \
+  -p ProtectSystem=strict -p ProtectHome=yes -p ProtectKernelTunables=yes \
+  -p ProtectKernelModules=yes -p ProtectKernelLogs=yes -p ProtectControlGroups=yes \
+  -p ProtectClock=yes -p ProtectHostname=yes -p ProtectProc=invisible \
+  -p RestrictSUIDSGID=yes -p RestrictNamespaces=yes -p RestrictRealtime=yes \
+  -p LockPersonality=yes -p SystemCallArchitectures=native -p SystemCallFilter=@system-service \
+  -p "RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK" \
+  -p CapabilityBoundingSet= -p UMask=0077 -p RuntimeMaxSec=600 \
+  /opt/dotnet/dotnet "$base/current/CampusPulse.Api.dll" import-timetable "${args[@]}"
