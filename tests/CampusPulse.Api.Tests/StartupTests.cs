@@ -56,4 +56,18 @@ public sealed class StartupTests
         Assert.True(keyManager.IsEnabled(LogLevel.Error));
         Assert.True(loggers.CreateLogger("Microsoft.AspNetCore.Hosting.Diagnostics").IsEnabled(LogLevel.Warning));
     }
+
+    /// <summary>EF Core logs every SQL command at Information; at Warning the API's log and the
+    /// timetable import's output keep only EF's warnings and errors (#43).</summary>
+    [Fact]
+    public void EF_Core_logs_no_SQL_commands()
+    {
+        using var factory = new SignInFactory();
+        var loggers = factory.Services.GetRequiredService<ILoggerFactory>();
+
+        var commands = loggers.CreateLogger("Microsoft.EntityFrameworkCore.Database.Command");
+        Assert.False(commands.IsEnabled(LogLevel.Information));
+        Assert.True(commands.IsEnabled(LogLevel.Warning));
+        Assert.True(loggers.CreateLogger("CampusPulse.Api").IsEnabled(LogLevel.Information));
+    }
 }
