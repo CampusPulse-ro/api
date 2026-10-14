@@ -3,9 +3,12 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using CampusPulse.Infrastructure;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Logging;
@@ -26,6 +29,13 @@ public sealed class StubPushHandler : HttpMessageHandler
     public StubPushHandler() => Respond = Default;
 
     public Func<Call, HttpResponseMessage> Respond { get; set; }
+
+    /// <summary>When set, answers instead of <see cref="Respond"/>: for an answer that has to do
+    /// something first (call the API, change the database) while the request is in flight.</summary>
+    public Func<Call, Task<HttpResponseMessage>>? RespondAsync { get; set; }
+
+    /// <summary>When set, every answer waits this long first (cancellable, like a slow server).</summary>
+    public TimeSpan? Delay { get; set; }
 
     /// <summary>The last ticket id handed out for each token.</summary>
     public ConcurrentDictionary<string, string> Tickets { get; } = new();
@@ -55,7 +65,12 @@ public sealed class StubPushHandler : HttpMessageHandler
             _calls.Add(call);
         }
 
-        return Respond(call);
+        if (Delay is { } delay)
+        {
+            await Task.Delay(delay, cancellationToken);
+        }
+
+        return RespondAsync is { } respondAsync ? await respondAsync(call) : Respond(call);
     }
 
     // The client factory disposes handlers it rotates out; this one outlives them.
@@ -133,7 +148,7 @@ public static class PushTesting
     /// set to <paramref name="clock"/> (tokens are still checked against the real one), and
     /// optionally a log collector.</summary>
     public static WebApplicationFactory<Program> With(this PostgresAppFactory factory, StubPushHandler expo, TestClock clock,
-        ILoggerProvider? logs = null) =>
+        ILoggerProvider? logs = null, params IInterceptor[] interceptors) =>
         factory.WithWebHostBuilder(builder => builder.ConfigureTestServices(services =>
         {
             UseHandler(services, expo);
@@ -143,6 +158,11 @@ public static class PushTesting
             if (logs is not null)
             {
                 services.AddSingleton<ILoggerProvider>(logs);
+            }
+
+            if (interceptors.Length > 0)
+            {
+                services.ConfigureDbContext<CampusPulseDbContext>(options => options.AddInterceptors(interceptors));
             }
         }));
 

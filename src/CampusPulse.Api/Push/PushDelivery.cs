@@ -16,7 +16,9 @@ public sealed record PushDeliveryResult(int Accepted, IReadOnlyDictionary<string
 /// <summary>
 /// Sends one notification to each of a student's devices, and acts on the tickets: an accepted one
 /// is kept in <c>push_receipts_pending</c> for <see cref="PushReceiptChecker"/>, and a
-/// <c>DeviceNotRegistered</c> one deletes its device at once. Logs counts and error codes only.
+/// <c>DeviceNotRegistered</c> one deletes its device at once, unless the device registered again
+/// after the send started (a reinstall can bring the same token back). Logs counts and error codes
+/// only.
 /// </summary>
 public sealed partial class PushDelivery(CampusPulseDbContext db, IPushSender sender, TimeProvider time,
     ILogger<PushDelivery> logger)
@@ -29,17 +31,18 @@ public sealed partial class PushDelivery(CampusPulseDbContext db, IPushSender se
             return new PushDeliveryResult(0, new Dictionary<string, int>());
         }
 
+        // A ticket or receipt speaks for the token as it was when the message left: the moment a later
+        // registration is compared with.
+        var sentAt = time.GetUtcNow();
         var tickets = await sender.SendAsync(devices.Select(d => new PushMessage(d.Token, title, body)).ToList(), cancellationToken);
-        var now = time.GetUtcNow();
-        var accepted = 0;
+        var accepted = new List<(Guid DeviceId, string TicketId)>();
         var refused = new Dictionary<string, int>(StringComparer.Ordinal);
         var unregistered = new List<Guid>();
         foreach (var (device, ticket) in devices.Zip(tickets))
         {
             if (ticket.Ok)
             {
-                accepted++;
-                db.PushReceiptsPending.Add(new PushReceiptPending(ticket.Id!, device.Id, now));
+                accepted.Add((device.Id, ticket.Id!));
                 continue;
             }
 
@@ -51,31 +54,60 @@ public sealed partial class PushDelivery(CampusPulseDbContext db, IPushSender se
             }
         }
 
+        await KeepReceiptsAsync(accepted, sentAt, cancellationToken);
+
+        var removed = unregistered.Count == 0
+            ? 0
+            : await db.PushDevices
+                .Where(d => unregistered.Contains(d.Id) && d.LastRegisteredAt < sentAt)
+                .ExecuteDeleteAsync(cancellationToken);
+
+        LogSent(logger, devices.Count, accepted.Count, removed);
+        foreach (var (code, count) in refused)
+        {
+            LogRefused(logger, code, count);
+        }
+
+        return new PushDeliveryResult(accepted.Count, refused);
+    }
+
+    /// <summary>Stores the accepted tickets. A device deleted while its message was on the way
+    /// (DELETE /me, sign-out) has nothing to hang a receipt on: the others are stored without it.</summary>
+    private async Task KeepReceiptsAsync(List<(Guid DeviceId, string TicketId)> accepted, DateTimeOffset sentAt,
+        CancellationToken cancellationToken)
+    {
+        if (accepted.Count == 0)
+        {
+            return;
+        }
+
+        db.ChangeTracker.Clear();
+        db.PushReceiptsPending.AddRange(accepted.Select(a => new PushReceiptPending(a.TicketId, a.DeviceId, sentAt)));
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+            return;
+        }
+        catch (DbUpdateException e) when (e.InnerException is PostgresException { SqlState: PostgresErrorCodes.ForeignKeyViolation })
+        {
+            db.ChangeTracker.Clear();
+        }
+
+        var ids = accepted.Select(a => a.DeviceId).ToList();
+        var stillThere = (await db.PushDevices.Where(d => ids.Contains(d.Id)).Select(d => d.Id).ToListAsync(cancellationToken)).ToHashSet();
+        LogReceiptsDropped(logger, accepted.Count(a => !stillThere.Contains(a.DeviceId)));
+        db.PushReceiptsPending.AddRange(accepted.Where(a => stillThere.Contains(a.DeviceId))
+            .Select(a => new PushReceiptPending(a.TicketId, a.DeviceId, sentAt)));
         try
         {
             await db.SaveChangesAsync(cancellationToken);
         }
         catch (DbUpdateException e) when (e.InnerException is PostgresException { SqlState: PostgresErrorCodes.ForeignKeyViolation })
         {
-            // A device was deleted while the message was on its way (DELETE /me, or sign-out): its
-            // receipt has nothing to belong to. The other receipts are lost too; only the devices
-            // Expo reports as gone, on a later send, would be missed.
+            // Deleted again in between: give up on these receipts rather than fail the send.
             db.ChangeTracker.Clear();
-            LogReceiptsDropped(logger, accepted);
+            LogReceiptsDropped(logger, stillThere.Count);
         }
-
-        if (unregistered.Count > 0)
-        {
-            await db.PushDevices.Where(d => unregistered.Contains(d.Id)).ExecuteDeleteAsync(cancellationToken);
-        }
-
-        LogSent(logger, devices.Count, accepted, unregistered.Count);
-        foreach (var (code, count) in refused)
-        {
-            LogRefused(logger, code, count);
-        }
-
-        return new PushDeliveryResult(accepted, refused);
     }
 
     [LoggerMessage(EventId = 40, Level = LogLevel.Information,
@@ -86,6 +118,6 @@ public sealed partial class PushDelivery(CampusPulseDbContext db, IPushSender se
     private static partial void LogRefused(ILogger logger, string errorCode, int count);
 
     [LoggerMessage(EventId = 42, Level = LogLevel.Warning,
-        Message = "{Count} push receipts not kept: a device was deleted during the send")]
+        Message = "{Count} push receipts not kept: their devices were deleted during the send")]
     private static partial void LogReceiptsDropped(ILogger logger, int count);
 }

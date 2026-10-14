@@ -2,6 +2,7 @@ using System.Net;
 using CampusPulse.Api.Push;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace CampusPulse.Api.Tests;
@@ -9,11 +10,18 @@ namespace CampusPulse.Api.Tests;
 /// <summary>The Expo client on a stub handler: batching, the ticket and receipt shapes, failures.</summary>
 public sealed class ExpoPushSenderTests
 {
-    private static (ExpoPushSender Sender, StubPushHandler Expo) Create()
+    private static (ExpoPushSender Sender, StubPushHandler Expo) Create(ILogger<ExpoPushSender>? logger = null,
+        TimeSpan? timeout = null)
     {
         var expo = new StubPushHandler();
-        var client = new HttpClient(expo) { BaseAddress = ExpoPushSender.BaseAddress };
-        return (new ExpoPushSender(client, NullLogger<ExpoPushSender>.Instance), expo);
+        var client = new HttpClient(expo) { BaseAddress = ExpoPushSender.BaseAddress, Timeout = timeout ?? ExpoPushSender.Timeout };
+        return (new ExpoPushSender(client, logger ?? NullLogger<ExpoPushSender>.Instance), expo);
+    }
+
+    private static (ILogger<ExpoPushSender> Logger, CollectingLoggerProvider Logs) Collecting()
+    {
+        var logs = new CollectingLoggerProvider();
+        return (LoggerFactory.Create(builder => builder.AddProvider(logs)).CreateLogger<ExpoPushSender>(), logs);
     }
 
     private static List<PushMessage> Messages(int count) =>
@@ -74,6 +82,83 @@ public sealed class ExpoPushSenderTests
     }
 
     [Fact]
+    public async Task A_timeout_refuses_the_batch_as_a_failed_request()
+    {
+        var (sender, expo) = Create(timeout: TimeSpan.FromMilliseconds(100));
+        expo.Delay = TimeSpan.FromSeconds(30);
+
+        var tickets = await sender.SendAsync(Messages(2), default);
+
+        Assert.All(tickets, t => Assert.Equal(PushErrors.RequestFailed, t.Error));
+    }
+
+    [Fact]
+    public async Task An_unreachable_service_refuses_the_batch_as_a_failed_request()
+    {
+        var (sender, expo) = Create();
+        expo.Respond = _ => throw new HttpRequestException("Connection refused");
+
+        var tickets = await sender.SendAsync(Messages(2), default);
+
+        Assert.All(tickets, t => Assert.Equal(PushErrors.RequestFailed, t.Error));
+    }
+
+    [Fact]
+    public async Task A_body_that_is_not_json_is_malformed()
+    {
+        var (sender, expo) = Create();
+        expo.Respond = _ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("<html>busy</html>") };
+
+        var tickets = await sender.SendAsync(Messages(2), default);
+
+        Assert.All(tickets, t => Assert.Equal(PushErrors.MalformedResponse, t.Error));
+    }
+
+    /// <summary>Expo refuses a whole request with error codes, and its details list the tokens: the
+    /// codes are logged, the tokens never.</summary>
+    [Theory]
+    [InlineData(400)]
+    [InlineData(200)]
+    public async Task A_refused_request_logs_expos_error_codes_and_never_its_details(int status)
+    {
+        var (logger, logs) = Collecting();
+        var (sender, expo) = Create(logger);
+        var messages = Messages(2);
+        expo.Respond = _ => StubPushHandler.Json(new
+        {
+            errors = new object[]
+            {
+                new { code = "PUSH_TOO_MANY_EXPERIENCE_IDS", message = $"Tokens: {messages[0].To}", details = new { a = new[] { messages[0].To }, b = new[] { messages[1].To } } },
+                new { code = $"weird {messages[1].To}" },
+            },
+        }, (HttpStatusCode)status);
+
+        var tickets = await sender.SendAsync(messages, default);
+
+        Assert.All(tickets, t => Assert.Equal(PushErrors.RequestFailed, t.Error));
+        var line = Assert.Single(logs.Entries);
+        Assert.Contains("PUSH_TOO_MANY_EXPERIENCE_IDS", line.Message);
+        Assert.Contains(PushErrors.Unknown, line.Message);
+        Assert.DoesNotContain(logs.Entries, e => messages.Any(m => e.Message.Contains(m.To, StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task A_refused_receipt_read_names_the_codes_and_never_the_details()
+    {
+        var (sender, expo) = Create();
+        var token = PushTesting.NewToken();
+        expo.Respond = _ => StubPushHandler.Json(new
+        {
+            errors = new[] { new { code = "PUSH_TOO_MANY_RECEIPTS", message = token, details = new { token } } },
+        }, HttpStatusCode.BadRequest);
+
+        var e = await Assert.ThrowsAsync<PushServiceException>(() => sender.GetReceiptsAsync(["ticket-1"], default));
+
+        Assert.Contains("PUSH_TOO_MANY_RECEIPTS", e.Message);
+        Assert.DoesNotContain(token, e.Message);
+    }
+
+    [Fact]
     public async Task An_answer_that_does_not_match_the_batch_is_malformed()
     {
         var (sender, expo) = Create();
@@ -108,11 +193,22 @@ public sealed class ExpoPushSenderTests
         Assert.True(receipts["ticket-9"].Ok);
     }
 
-    [Fact]
-    public async Task Receipts_that_cannot_be_read_throw()
+    public static TheoryData<string> UnreadableReceipts => new() { "429", "data is an array", "not JSON", "timeout", "unreachable" };
+
+    [Theory]
+    [MemberData(nameof(UnreadableReceipts))]
+    public async Task Receipts_that_cannot_be_read_throw(string answer)
     {
-        var (sender, expo) = Create();
-        expo.Respond = _ => new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+        var (sender, expo) = Create(timeout: TimeSpan.FromMilliseconds(answer == "timeout" ? 100 : 15_000));
+        expo.Respond = answer switch
+        {
+            "429" => _ => new HttpResponseMessage(HttpStatusCode.TooManyRequests),
+            "data is an array" => _ => StubPushHandler.Json(new { data = new[] { 1, 2 } }),
+            "not JSON" => _ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("busy") },
+            "unreachable" => _ => throw new HttpRequestException("Connection refused"),
+            _ => expo.Default,
+        };
+        expo.Delay = answer == "timeout" ? TimeSpan.FromSeconds(30) : null;
 
         await Assert.ThrowsAsync<PushServiceException>(() => sender.GetReceiptsAsync(["ticket-1"], default));
     }
@@ -167,5 +263,53 @@ public sealed class PushSetupTests
 
         Assert.Equal("Bearer", client.DefaultRequestHeaders.Authorization?.Scheme);
         Assert.Equal("expo-access-token-for-tests", client.DefaultRequestHeaders.Authorization?.Parameter);
+    }
+}
+
+public sealed class TestNotificationLimitTests
+{
+    private static readonly DateTimeOffset Start = new(2030, 1, 1, 8, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public void A_slot_is_held_for_a_minute_then_free_again()
+    {
+        var clock = new TestClock(Start);
+        var limit = new TestNotificationLimit(clock);
+        var student = Guid.NewGuid();
+
+        Assert.True(limit.TryStart(student, out _));
+        clock.Advance(TimeSpan.FromSeconds(45));
+        Assert.False(limit.TryStart(student, out var retryAfter));
+        Assert.Equal(TimeSpan.FromSeconds(15), retryAfter);
+        clock.Advance(TimeSpan.FromSeconds(15));
+        Assert.True(limit.TryStart(student, out _));
+    }
+
+    [Fact]
+    public void A_released_slot_can_be_taken_again_at_once()
+    {
+        var limit = new TestNotificationLimit(new TestClock(Start));
+        var student = Guid.NewGuid();
+        Assert.True(limit.TryStart(student, out _));
+
+        limit.Release(student);
+
+        Assert.True(limit.TryStart(student, out _));
+    }
+
+    /// <summary>Nothing about a student outlives the minute: expired entries go on the next call,
+    /// however few students there are (a deleted account's id included).</summary>
+    [Fact]
+    public void Expired_entries_are_dropped_on_every_call()
+    {
+        var clock = new TestClock(Start);
+        var limit = new TestNotificationLimit(clock);
+        Assert.True(limit.TryStart(Guid.NewGuid(), out _));
+        Assert.True(limit.TryStart(Guid.NewGuid(), out _));
+
+        clock.Advance(TestNotificationLimit.Window);
+        Assert.True(limit.TryStart(Guid.NewGuid(), out _));
+
+        Assert.Equal(1, limit.Count);
     }
 }

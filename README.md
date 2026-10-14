@@ -157,6 +157,10 @@ clients follow `main`.
 - Integers are serialized as numbers only (`JsonNumberHandling.Strict`) and enums by their
   camelCase name (`JsonStringEnumConverter` with `JsonNamingPolicy.CamelCase`: `PushPlatform.Ios` is
   `"ios"`), so they become `number` and string unions, not `number | string`.
+- Request bodies are read as strictly as the contract describes them: every constructor parameter of
+  a body record must be present (`RespectRequiredConstructorParameters`) and an enum is accepted only
+  by name, never as a number. A body that can't be read is a **400** ProblemDetails (an empty 400 gets
+  one from `UseStatusCodePages`), in every environment.
 - Declare every response (`.Produces<T>()`, `.Produces<T>(503)`) so clients get a type for it.
 
 ## Data
@@ -196,21 +200,25 @@ Every endpoint needs sign-in, and the first and last need an account (404 like `
 - `POST /me/devices` `{ token, platform }` (`platform` is `"android"` or `"ios"`): registers the
   app's Expo push token for the student. **201** when it's new, **200** when it was known (its
   last-registered time is refreshed). **400** ProblemDetails unless `token` looks like
-  `ExponentPushToken[…]` or `ExpoPushToken[…]` (letters, digits, `_`, `-`). A token registered by
+  `ExponentPushToken[…]` or `ExpoPushToken[…]` (letters, digits, `_`, `-`), and **400** too when
+  `platform` is missing or isn't one of the two names (a number isn't accepted). A token registered by
   another student moves to this one (another student signed in on the same phone). A student
   keeps at most **10** devices: registering an 11th drops the least recently registered.
-- `DELETE /me/devices` `{ token }`: forgets that device. **204** always, also for a token that isn't
-  the student's (nothing happens), so the answer doesn't tell whose a token is. The token goes in the
+- `DELETE /me/devices` `{ token }`: forgets that device. **204** for any token, also one that isn't
+  the student's (nothing happens), so the answer doesn't tell whose a token is; **400** only when the
+  body isn't `{ token }`. The token goes in the
   body, not the path, because paths are logged here and by the reverse proxy, and push tokens never
   are.
 - `POST /me/notifications/test`: sends "CampusPulse test notification" to the student's devices and
   answers `{ sent }`, the number the push service accepted it for. Once a minute per student:
-  **429** with `Retry-After` otherwise. The limit is kept **in memory**, so a restart forgets it and
-  each API instance would count on its own. **502** when the push service can't be used at all.
+  **429** with `Retry-After` otherwise. Only a send that reached the push service counts, so after
+  `sent: 0` with no devices, or a 502, the next tap sends right away. The limit is kept **in
+  memory**: a restart forgets it, each API instance would count on its own, and an entry is dropped
+  as soon as its minute is over. **502** when the push service can't be used at all.
 
 **What the clients do:**
-- Register (`POST /me/devices`) after `POST /me` and whenever the Expo push token changes
-  (`addPushTokenListener`).
+- Register (`POST /me/devices`) on **every app launch** (Expo's advice: it keeps the token fresh),
+  after `POST /me`, and whenever the Expo push token changes (`addPushTokenListener`).
 - Delete it (`DELETE /me/devices`) on sign-out, before dropping the access token.
 - `DELETE /me` removes every device with the account.
 
@@ -219,12 +227,18 @@ Every endpoint needs sign-in, and the first and last need an account (404 like `
 - Expo answers each message with a ticket. A `DeviceNotRegistered` ticket (the app was uninstalled)
   deletes that device at once. An accepted one is kept in `push_receipts_pending`.
 - A background service (`PushReceiptChecker`) runs every 15 minutes. It reads the receipts of the
-  tickets that are at least 15 minutes old (in batches of 300), deletes the devices whose receipt
-  is `DeviceNotRegistered`, and drops every answered row and any row older than 24 hours. With
-  nothing pending, a pass is one query.
+  tickets that are at least 15 minutes old, in batches of 300, each applied on its own in one
+  transaction: first the devices whose receipt is `DeviceNotRegistered`, then the answered rows. A
+  batch Expo can't answer keeps its rows for the next pass. Rows older than 24 hours are dropped
+  unread. With nothing pending, a pass is one query.
+- **A device that registered again after a message was sent is never deleted for that message.** A
+  reinstall can bring the same Expo token back, so a late `DeviceNotRegistered` (ticket or receipt)
+  deletes the device only if its last registration is older than the send.
 
-**Logs** carry counts and Expo's error codes (`DeviceNotRegistered`, `MessageTooBig`…) only, never a
-push token, user id or email. Expo's own error texts quote the token, so they're never kept.
+**Logs** carry counts and Expo's error codes (`DeviceNotRegistered`, `MessageTooBig`, a failed
+request's `PUSH_TOO_MANY_EXPERIENCE_IDS`…) only, never a push token, user id or email. Expo's own
+error texts and details quote tokens, so they're never kept, and a code that isn't ASCII letters and
+`_` is logged as `Unknown`.
 
 **Network:** the push client sets no proxy of its own. It uses
 [`HttpClient.DefaultProxy`](https://learn.microsoft.com/dotnet/api/system.net.http.httpclient.defaultproxy),

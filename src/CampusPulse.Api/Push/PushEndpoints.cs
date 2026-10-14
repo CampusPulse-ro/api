@@ -46,6 +46,7 @@ public static class PushEndpoints
             .RequireAuthorization()
             .WithName("UnregisterPushDevice")
             .WithTags("Push")
+            .ProducesProblem(StatusCodes.Status400BadRequest)
             .Produces(StatusCodes.Status401Unauthorized);
 
         app.MapPost("/me/notifications/test", SendTestNotification)
@@ -85,11 +86,13 @@ public static class PushEndpoints
             {
                 return await RegisterOnceAsync(request, identity, db, time.GetUtcNow(), cancellationToken);
             }
-            catch (DbUpdateException e) when (attempt == 1
-                && e.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })
+            catch (DbUpdateException e) when (attempt == 1 && (e is DbUpdateConcurrencyException
+                || e.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation }))
             {
-                // Another student registered the same token at the same moment (one phone, two
-                // sign-ins): the row exists now, so the second try moves it.
+                // Someone else changed this token's row between the read and the write: another
+                // student registered it at the same moment (one phone, two sign-ins; the insert hits
+                // the unique index), or it was moved or deleted (the update matches no row). The
+                // second try reads it again.
                 db.ChangeTracker.Clear();
             }
         }
@@ -140,9 +143,9 @@ public static class PushEndpoints
     }
 
     /// <summary>
-    /// Forgets one of the signed-in student's devices (the app calls it on sign-out). Always 204: a
-    /// token that isn't theirs, or isn't registered at all, changes nothing, so the answer can't be
-    /// used to find out whose a token is.
+    /// Forgets one of the signed-in student's devices (the app calls it on sign-out). 204 for any
+    /// token: one that isn't theirs, or isn't registered at all, changes nothing, so the answer can't
+    /// be used to find out whose a token is. Only a body that isn't <c>{ token }</c> is a 400.
     /// </summary>
     internal static async Task<NoContent> UnregisterDevice([FromBody] UnregisterDeviceRequest request,
         ClaimsPrincipal principal, CampusPulseDbContext db, CancellationToken cancellationToken)
@@ -161,8 +164,9 @@ public static class PushEndpoints
     /// <summary>
     /// Sends "CampusPulse test notification" to the signed-in student's devices and answers how many
     /// the push service accepted it for. Once per minute per student (429 with Retry-After
-    /// otherwise; see <see cref="TestNotificationLimit"/>), 404 without an account, 502 when the
-    /// push service couldn't be used at all.
+    /// otherwise; see <see cref="TestNotificationLimit"/>), counting only sends that reached the push
+    /// service: with no devices, or a 502, the next tap may send right away. 404 without an account,
+    /// 502 when the push service couldn't be used at all.
     /// </summary>
     internal static async Task<Results<Ok<TestNotificationResponse>, ProblemHttpResult>> SendTestNotification(
         ClaimsPrincipal principal, CampusPulseDbContext db, PushDelivery delivery, TestNotificationLimit limit,
@@ -183,7 +187,22 @@ public static class PushEndpoints
         }
 
         var devices = await db.PushDevices.Where(d => d.UserId == user.Id).ToListAsync(cancellationToken);
-        var result = await delivery.SendAsync(devices, TestTitle, TestBody, cancellationToken);
+        PushDeliveryResult result;
+        try
+        {
+            result = await delivery.SendAsync(devices, TestTitle, TestBody, cancellationToken);
+        }
+        catch
+        {
+            limit.Release(user.Id);
+            throw;
+        }
+
+        if (devices.Count == 0 || result.ServiceFailed)
+        {
+            limit.Release(user.Id);
+        }
+
         if (result.ServiceFailed)
         {
             return TypedResults.Problem(statusCode: StatusCodes.Status502BadGateway, title: "Push service unavailable",
