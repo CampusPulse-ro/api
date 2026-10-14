@@ -22,6 +22,22 @@ namespace CampusPulse.Infrastructure.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("CampusPulse.Domain.Users.AccountDeletionCount", b =>
+                {
+                    b.Property<DateOnly>("Day")
+                        .HasColumnType("date")
+                        .HasColumnName("day");
+
+                    b.Property<int>("Deletions")
+                        .HasColumnType("integer")
+                        .HasColumnName("deletions");
+
+                    b.HasKey("Day")
+                        .HasName("pk_account_deletion_counts");
+
+                    b.ToTable("account_deletion_counts", (string)null);
+                });
+
             modelBuilder.Entity("CampusPulse.Domain.Users.User", b =>
                 {
                     b.Property<Guid>("Id")
