@@ -71,11 +71,39 @@ journalctl -u campuspulse-api-stage -f               # the service's own output
 - **Network guard** ([`netguard.nft`](netguard.nft); loaded by
   [`campuspulse-netguard.service`](campuspulse-netguard.service), again by each unit before it starts,
   and by the deploy right before migrations): **deny by default**. The two app users may only answer
-  connections made to them (nginx) and reach their Postgres on 127.0.0.1:5435. No other local service,
+  connections made to them (nginx), reach their Postgres on 127.0.0.1:5435, and use the egress proxy on
+  127.0.0.1:8899 (see [Egress proxy](#egress-proxy)). No other local service,
   no LAN or tailnet, and no public internet either: the Pi's own public IP comes back through the
   router's hairpin NAT looking like LAN traffic, so "public only" isn't safe. A feature that needs an
-  outside service (push notifications, error reporting) adds that destination here explicitly. The
+  outside service (push notifications, error reporting) adds its host to the proxy's allow-list, never a
+  rule here. The
   units also drop `AF_UNIX`, so world-writable local sockets are out of reach.
+
+## Egress proxy
+
+The guard lets the app users reach nothing outside the Pi. For the few services the API does need, it
+goes through **tinyproxy** on `127.0.0.1:8899` ([`tinyproxy.conf`](tinyproxy.conf)): HTTPS (CONNECT to
+port 443) only, default-deny, to hosts listed in [`egress-allow`](egress-allow) as `^host:443$`
+(`FilterURLs On`: plain-HTTP requests never match, so they're refused too). Today that's only
+`login.microsoftonline.com` (sign-in metadata and keys). The env files set
+`HTTPS_PROXY=http://127.0.0.1:8899` and `NO_PROXY=127.0.0.1,localhost`; .NET's HttpClient honours them.
+
+To allow a new host (push notifications, error reporting): add one `^host\.name:443$` line to `egress-allow` in
+the same PR as the feature, then on the Pi `sudo install -m 644 deploy/pi/egress-allow
+/etc/tinyproxy/campuspulse-allow && sudo systemctl restart tinyproxy`. Don't widen the guard instead.
+
+The proxy itself is confined by the guard too (user `tinyproxy`: DNS on Tailscale's resolver and HTTPS to
+public addresses only), and logs every tunnel as `CONNECT host:443`. Known limits: stage and prod share
+one proxy (20 connections), so a misbehaving stage could slow prod's key refresh; and the guard can't
+tell the Pi's own public IP from any other public address, so the allow-list is what keeps the proxy
+off the hairpin path.
+
+## Request ids
+
+nginx gives every request its own id and passes it to the app as `X-Request-Id`, ignoring any id the
+client sent. The app returns it and puts it on every log line; nginx logs it as `rid=` in
+`/var/log/nginx/campuspulse.access.log` ([`nginx-campuspulse-request-id.conf`](nginx-campuspulse-request-id.conf)),
+so a request can be followed from nginx into the app's logs.
 
 ## One-time setup (already done; for a new machine)
 
@@ -97,6 +125,13 @@ journalctl -u campuspulse-api-stage -f               # the service's own output
   Their non-secret settings live in the unit (`ASPNETCORE_URLS`, `Logging__File__Path`, which must
   stay inside the unit's writable `BindPaths` folder or the API refuses to start); secrets stay in the
   env files.
-- nginx server blocks for both names (DNS: CNAMEs to `thorsp.net`), with a Let's Encrypt certificate.
+- nginx: [`nginx-campuspulse.conf`](nginx-campuspulse.conf) (both names; DNS: CNAMEs to `thorsp.net`; TLS by
+  certbot, cert `campuspulse`) and [`nginx-campuspulse-request-id.conf`](nginx-campuspulse-request-id.conf) in
+  `/etc/nginx/conf.d/`.
+- tinyproxy: write [`tinyproxy.conf`](tinyproxy.conf) to `/etc/tinyproxy/` and [`egress-allow`](egress-allow) to
+  `/etc/tinyproxy/campuspulse-allow` BEFORE `apt install tinyproxy -o Dpkg::Options::=--force-confold` (its
+  default config listens on every interface), plus [`tinyproxy.service.d-campuspulse.conf`](tinyproxy.service.d-campuspulse.conf)
+  as `/etc/systemd/system/tinyproxy.service.d/campuspulse.conf` (it starts only after the guard); the env
+  files get `HTTPS_PROXY` / `NO_PROXY`.
 - The repo webhook (event `workflow_run`) pointing at pi-control's `/gh/campuspulse-deploy`, with its
   own secret.

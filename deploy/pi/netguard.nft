@@ -3,21 +3,38 @@
 # a flushed ruleset can't leave the app running unguarded.
 #
 # DENY BY DEFAULT. The app (and its migration bundle) may only answer connections made to it (nginx)
-# and open connections to its own Postgres on 127.0.0.1:5435. Nothing else: not other local services,
+# and open connections to its own Postgres on 127.0.0.1:5435 and to the egress proxy on 127.0.0.1:8899
+# (tinyproxy.conf + egress-allow: HTTPS to listed hosts only). Nothing else: not other local services,
 # not the LAN or tailnet, and not the public internet, because the Pi's own public IP comes back
 # through the router's hairpin NAT looking like LAN traffic. If the app ever needs an outside service,
-# allow that destination explicitly here.
+# add its host to egress-allow, never a rule here.
 table inet campuspulse_guard
 flush table inet campuspulse_guard
 table inet campuspulse_guard {
 	chain output {
 		type filter hook output priority filter; policy accept;
 		meta skuid { "campuspulse-stage", "campuspulse-prod" } jump app_out
+		meta skuid "tinyproxy" jump proxy_out
 	}
 	chain app_out {
 		ct state established,related accept
 		# The ORIGINAL destination, so it also holds if Docker ever DNATs the port instead of docker-proxy.
 		meta l4proto tcp ct original ip daddr 127.0.0.1 ct original proto-dst 5435 accept
+		# The egress proxy (tinyproxy, 127.0.0.1:8899): it only lets them reach hosts in
+		# /etc/tinyproxy/campuspulse-allow (Microsoft sign-in metadata and keys).
+		meta l4proto tcp ct original ip daddr 127.0.0.1 ct original proto-dst 8899 accept
+		counter reject
+	}
+	# The egress proxy itself: DNS on Tailscale's resolver and HTTPS to public addresses only, so even a
+	# compromised tinyproxy can't reach local services, the LAN or the tailnet. (Its allow-list narrows
+	# that to listed hosts.)
+	chain proxy_out {
+		ct state established,related accept
+		ip daddr 100.100.100.100 meta l4proto { tcp, udp } th dport 53 accept
+		ip6 daddr fd7a:115c:a1e0::53 meta l4proto { tcp, udp } th dport 53 accept
+		ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/3 } counter reject
+		ip6 daddr { ::1, ::ffff:0:0/96, fc00::/7, fe80::/10, ff00::/8 } counter reject
+		tcp dport 443 accept
 		counter reject
 	}
 }
