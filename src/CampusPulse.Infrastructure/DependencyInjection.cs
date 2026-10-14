@@ -6,8 +6,12 @@ namespace CampusPulse.Infrastructure;
 
 public static class DependencyInjection
 {
+    /// <param name="requireConnectionString">
+    /// <c>false</c> only where no configuration exists by design: the build writing the OpenAPI
+    /// document. The registration is the same either way; only the fail-fast check differs.
+    /// </param>
     public static IServiceCollection AddCampusPulsePersistence(
-        this IServiceCollection services, IConfiguration configuration)
+        this IServiceCollection services, IConfiguration configuration, bool requireConnectionString = true)
     {
         var connectionString = configuration.GetConnectionString("Postgres");
 
@@ -17,8 +21,13 @@ public static class DependencyInjection
         // database down; only requests that need it fail.
         if (string.IsNullOrWhiteSpace(connectionString))
         {
-            throw new InvalidOperationException(
-                "ConnectionStrings__Postgres is not set. See README.md.");
+            if (requireConnectionString)
+            {
+                throw new InvalidOperationException(
+                    "ConnectionStrings__Postgres is not set. See README.md.");
+            }
+
+            connectionString = null;
         }
 
         services.AddDbContext<CampusPulseDbContext>(options => Configure(options, connectionString));

@@ -72,6 +72,11 @@ dotnet_naming_style.underscore_camel.capitalization = camel_case
 [*.{csproj,props,targets,slnx,xml,json,yml,yaml}]
 indent_size = 2
 
+# Written by the build (Microsoft.Extensions.ApiDescription.Server) exactly as committed; CI fails
+# when it differs. Never edit it by hand, and don't let an editor add a final newline.
+[openapi/*.json]
+insert_final_newline = false
+
 # EF Core writes migrations with block namespaces, a UTF-8 BOM and no auto-generated header:
 # treat them as generated so style rules (IDE0161 under -warnaserror) and the charset check skip them.
 [src/CampusPulse.Infrastructure/Migrations/*.cs]

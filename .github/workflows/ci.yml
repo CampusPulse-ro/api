@@ -40,7 +40,7 @@ jobs:
 
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '10.0.x'
+          global-json-file: global.json
 
       - run: dotnet restore
 
@@ -54,8 +54,32 @@ jobs:
       # Code warnings fail the build, but NuGet audit warnings (NU19xx) only warn: a newly
       # published advisory against a transitive package would otherwise block every open PR
       # overnight through no fault of the change.
+      # The build writes openapi/v1.json, the contract the mobile and web clients generate their
+      # types from. Delete the committed copy first, so a build that stops writing it fails below
+      # (as a deletion) instead of passing on the stale file.
+      - name: Remove the committed contract
+        run: rm -f openapi/v1.json
+
       - name: Build
         run: dotnet build --no-restore -c Release -warnaserror -warnnotaserror:NU1901,NU1902,NU1903,NU1904
+
+      # Committed, so a change to the API without regenerating it fails here.
+      - name: OpenAPI contract is up to date
+        id: contract
+        run: |
+          if ! git diff --exit-code -- openapi/ || [ -n "$(git status --porcelain -- openapi/)" ]; then
+            echo "::error file=openapi/v1.json::openapi/v1.json is stale: run dotnet build and commit openapi/v1.json (or download the openapi-v1 artifact of this run and commit it)"
+            exit 1
+          fi
+
+      - name: Upload the regenerated contract
+        if: ${{ failure() && steps.contract.outcome == 'failure' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: openapi-v1
+          path: openapi/v1.json
+          if-no-files-found: ignore
+          retention-days: 7
 
       # A model change without its migration fails here, not at the next deploy. In dotnet ef,
       # `-c` is --context, not the configuration.
@@ -75,7 +99,7 @@ jobs:
 
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '10.0.x'
+          global-json-file: global.json
 
       # Portable, framework-dependent output: runs wherever the .NET 10 runtime is installed,
       # the Pi included. The deploy workflow will ship this artifact to the Pi, so nothing is
@@ -114,7 +138,7 @@ jobs:
 
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '10.0.x'
+          global-json-file: global.json
 
       # Built by the SDK from the csproj (no Dockerfile) into a tarball, not pushed: this only
       # proves the image still builds for both architectures. Pushing to GHCR comes with a

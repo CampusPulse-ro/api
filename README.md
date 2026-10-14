@@ -4,8 +4,9 @@ Backend API for CampusPulse, shared by the [`mobile`](https://github.com/CampusP
 and [`web`](https://github.com/CampusPulse-ro/web) clients.
 
 - **Stack:** .NET 10 (ASP.NET Core) · PostgreSQL 18 · EF Core 10 (Npgsql)
-- **Contract:** the OpenAPI document at **`/openapi/v1.json`**. The clients generate their
-  typed API client from it, so it is served in every environment, not only Development.
+- **Contract:** [`openapi/v1.json`](openapi/v1.json), committed. The clients generate their typed
+  API client from it (see [API contract](#api-contract)); the running API also serves it at
+  `/openapi/v1.json` in every environment.
 
 ## Layout
 
@@ -37,6 +38,39 @@ dotnet run --project src/CampusPulse.Api   # http://localhost:5280 (connection s
 - `GET /health/ready` → `{"status":"ok"}`, or **503** `{"status":"unavailable"}` when the database
   can't be reached within 3 s (readiness; the deploy checks this one)
 - `GET /openapi/v1.json` → the API contract
+
+## API contract
+
+`openapi/v1.json` is written by the build (`Microsoft.Extensions.ApiDescription.Server`) and
+committed. **Regenerating it is just `dotnet build`**: commit the changed file with the change that
+caused it. If the file didn't change after an API change, run `dotnet build --no-incremental`. CI
+deletes the committed copy, rebuilds it and fails when the result differs ("run dotnet build and
+commit openapi/v1.json"); that run also uploads the regenerated file as the `openapi-v1` artifact,
+so the fix can be "download and commit". Never edit it by hand. Only per-architecture builds (for
+example the linux-arm64 migrations bundle) skip writing it.
+
+The SDK is pinned by `global.json` (10.0.4xx band, latest patch), so every machine and CI generate
+the same JSON.
+
+The clients read it straight from GitHub, so they need no token:
+
+```bash
+bunx openapi-typescript https://raw.githubusercontent.com/CampusPulse-ro/api/main/openapi/v1.json \
+  -o src/api/schema.d.ts
+```
+
+and call the API through [`openapi-fetch`](https://openapi-ts.dev/openapi-fetch/) with those types.
+`main` in that URL can be a release tag (`…/api/v0.2.0/openapi/v1.json`) to pin a client to a
+released contract. List every endpoint change in the PR's "API contract" section, since the
+clients follow `main`.
+
+**Writing endpoints so the generated types are right:**
+
+- Write response DTOs as positional records (`record HealthResponse(string Status)`) or with
+  `required` members; otherwise their fields come out optional (`?`) in TypeScript.
+- Integers are serialized as numbers only (`JsonNumberHandling.Strict`) and enums by name
+  (`JsonStringEnumConverter`), so they become `number` and string unions, not `number | string`.
+- Declare every response (`.Produces<T>()`, `.Produces<T>(503)`) so clients get a type for it.
 
 ## Database migrations
 

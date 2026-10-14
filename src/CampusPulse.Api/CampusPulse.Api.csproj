@@ -10,6 +10,15 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
+  <!-- Build-time OpenAPI document (Microsoft.Extensions.ApiDescription.Server): openapi/v1.json at
+       the repo root. Only on portable builds: a build for one runtime (the multi-arch container,
+       the linux-arm64 migrations bundle) can't run the app on the build machine to produce it. -->
+  <PropertyGroup>
+    <OpenApiDocumentsDirectory>$(MSBuildProjectDirectory)/../../openapi</OpenApiDocumentsDirectory>
+    <OpenApiGenerateDocumentsOptions>--file-name v1</OpenApiGenerateDocumentsOptions>
+    <OpenApiGenerateDocumentsOnBuild Condition="'$(RuntimeIdentifier)' != ''">false</OpenApiGenerateDocumentsOnBuild>
+  </PropertyGroup>
+
   <!-- Container image without a Dockerfile: `dotnet publish -t:PublishContainer` (built into
        the SDK; no Docker daemon needed to build it). Only for hosts that run images (Cloud Run,
        Azure Container Apps, Fly.io). The Pi runs the plain published output under systemd.
@@ -24,6 +33,13 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.5" />
+    <!-- Writes the OpenAPI document at build time: openapi/v1.json at the repo root is the
+         contract the mobile and web clients generate their types from, committed, and CI fails
+         when it is stale. -->
+    <PackageReference Include="Microsoft.Extensions.ApiDescription.Server" Version="10.0.5">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.11">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
