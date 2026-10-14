@@ -17,10 +17,26 @@ namespace CampusPulse.Infrastructure.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "10.0.11")
+                .HasAnnotation("ProductVersion", "10.0.13")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
+
+            modelBuilder.Entity("CampusPulse.Domain.Users.AccountDeletionCount", b =>
+                {
+                    b.Property<DateOnly>("Day")
+                        .HasColumnType("date")
+                        .HasColumnName("day");
+
+                    b.Property<int>("Deletions")
+                        .HasColumnType("integer")
+                        .HasColumnName("deletions");
+
+                    b.HasKey("Day")
+                        .HasName("pk_account_deletion_counts");
+
+                    b.ToTable("account_deletion_counts", (string)null);
+                });
 
             modelBuilder.Entity("CampusPulse.Domain.Users.User", b =>
                 {
