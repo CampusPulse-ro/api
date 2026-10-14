@@ -1,0 +1,22 @@
+# Release notes configuration (NOT the release workflow, which is .github/workflows/release.yml).
+# `gh release create vX.Y.Z --generate-notes` groups the merged PRs by label.
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+  categories:
+    - title: Features
+      labels:
+        - enhancement
+        - feat
+    - title: Fixes
+      labels:
+        - bug
+    - title: Dependencies
+      labels:
+        - dependencies
+      authors:
+        - dependabot[bot]
+    - title: Other changes
+      labels:
+        - "*"
