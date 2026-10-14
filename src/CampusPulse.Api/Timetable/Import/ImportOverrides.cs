@@ -95,6 +95,11 @@ public sealed class ImportOverrides
             {
                 throw new FormatException($"overrides: sheets.\"{name}\".topRowWeeks must be odd or even.");
             }
+
+            if (sheet.RequiredSubjects.FirstOrDefault(r => sheet.OptionalSubjects.Any(o => CellText.NameKey(o) == CellText.NameKey(r))) is { } both)
+            {
+                throw new FormatException($"overrides: sheets.\"{name}\": \"{both}\" is in both optionalSubjects and requiredSubjects.");
+            }
         }
 
         foreach (var (key, cell) in Cells)
@@ -316,6 +321,11 @@ public sealed class SheetOverrides
     /// <summary>Subjects (full names) whose classes on the grid are offers any student of the year can
     /// pick, whatever column they sit in: optional courses grouped differently from the timetable groups.</summary>
     public List<string> OptionalSubjects { get; set; } = [];
+
+    /// <summary>Subjects (full names) every student of the year has, though an optional or facultative
+    /// column offers them (a required course whose labs are listed with the optional ones): those offers
+    /// are times to pick from, as in a pickSlot column.</summary>
+    public List<string> RequiredSubjects { get; set; } = [];
 }
 
 public sealed class ColumnLabelOverride

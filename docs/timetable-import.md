@@ -136,6 +136,11 @@ The grid is the same on every sheet the faculty publishes:
   - Columns not given a role hold notes.
 - **Optional courses grouped differently from the timetable groups:** the sheet's `optionalSubjects`
   makes their classes on the grid offers to the whole year, whatever column they sit in.
+- **A required subject offered beside the grid** (a required course whose labs are listed with the
+  optional ones) would read as optional. The sheet's `requiredSubjects` keeps it required: everyone has
+  its classes on the grid and picks one of its offered times. Check a sheet's "has classes on the grid
+  and is offered here as optional" warnings against the curriculum, since that subject then shows only to
+  students who choose it.
 - **Everything else** (sport, consultation hours, footnotes, rotas per subgroup written out) becomes a
   note of its programme and year.
 
@@ -173,6 +178,7 @@ sheets:                       # by sheet name; a sheet no source lists, or not l
     tags: { R: ROB, E: SUB }  # an optional lab's [R]/[E] -> programme
     aliases: { GEO: "Geometria fractalilor" }
     optionalSubjects: ["Vizualizare stiintifica"]   # its grid classes are offers to the whole year
+    requiredSubjects: ["Logica senzorilor virtuali"]   # required, though column Q offers its labs
     topRowWeeks: odd          # (default) a one-hour alternating cell in the top row: odd weeks
     alternate: true           # (default) false reads one-hour cells as written
   "An 1 MDATA": { year: 1, programme: MDATA, columnRoles: { E: pickSlot } }   # one group

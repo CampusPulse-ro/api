@@ -521,6 +521,25 @@ public sealed class TimetableParserTests
     }
 
     [Fact]
+    public void A_required_subject_offered_with_the_optional_ones_stays_required_and_its_offers_are_times_to_pick()
+    {
+        var parsed = Parse(Overrides.Replace("optionalSubjects: [\"Vizualizare stiintifica\"]",
+            "optionalSubjects: [\"Vizualizare stiintifica\"]\n    requiredSubjects: [\"Integrarea si testarea senzorilor robotici\", \"Nimic\"]"));
+
+        foreach (var programme in new[] { "ROB", "SUB" })
+        {
+            var subject = new SubjectKey(programme, 3, "Integrarea si testarea senzorilor robotici");
+            Assert.Equal(SubjectChoice.PickSlot, parsed.Subjects[subject].Choice);
+            Assert.Equal(4, parsed.Offers.Count(o => o.Subject == subject && !o.Kinds.HasFlag(ActivityKinds.Facultative)));
+            Assert.Single(parsed.Slots, s => s.Subject == subject && s.Kinds == ActivityKinds.Course);
+        }
+
+        Assert.DoesNotContain(parsed.Warnings, w => w.Contains("Integrarea si testarea senzorilor robotici has classes on the grid", StringComparison.Ordinal));
+        Assert.Contains("An 3: overrides: sheets.\"An 3\".requiredSubjects \"Nimic\" matched no subject", parsed.Warnings);
+        Assert.Equal(SubjectChoice.Optional, parsed.Subjects[new SubjectKey("ROB", 3, "Vizualizare stiintifica")].Choice);
+    }
+
+    [Fact]
     public void An_optional_subjects_classes_on_the_grid_are_offers_to_the_whole_year_once_each()
     {
         var parsed = Parse();
@@ -610,6 +629,8 @@ public sealed class TimetableParserTests
     [InlineData("omega: { sheets: [\"Omega 4\"] }", "omega: { sheets: [\"An 1\"] }")]
     [InlineData("omega: { sheets: [\"Omega 4\"] }", "omega: { sheets: [\"No such sheet\"] }")]
     [InlineData("kind: course", "kind: lecture")]
+    [InlineData("optionalSubjects: [\"Vizualizare stiintifica\"]",
+        "optionalSubjects: [\"Vizualizare stiintifica\"]\n    requiredSubjects: [\"Vizualizare Stiintifica\"]")]
     public void Bad_overrides_are_refused(string from, string to) =>
         Assert.ThrowsAny<Exception>(() => ImportOverrides.Parse(Overrides.Replace(from, to)));
 

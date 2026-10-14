@@ -89,6 +89,7 @@ public sealed partial class SheetParser(ImportOverrides overrides)
             config.Aliases.ToDictionary(a => CellText.NameKey(a.Key), a => a.Value.Trim());
         private readonly HashSet<string> _usedAliases = [];
         private readonly HashSet<string> _optional = config.OptionalSubjects.Select(CellText.NameKey).ToHashSet();
+        private readonly HashSet<string> _required = config.RequiredSubjects.Select(CellText.NameKey).ToHashSet();
         private readonly HashSet<ParsedOffer> _gridOffers = [];
         private readonly HashSet<(GridCell, string)> _warnedOptional = [];
         private GroupKey? _singleGroup;
@@ -140,9 +141,12 @@ public sealed partial class SheetParser(ImportOverrides overrides)
                 Warn($"overrides: sheets.\"{Name}\".aliases.\"{alias}\" matched nothing");
             }
 
-            foreach (var optional in config.OptionalSubjects.Where(o => !result.Subjects.Keys.Any(k => CellText.NameKey(k.Name) == CellText.NameKey(o))))
+            foreach (var (list, names) in new[] { ("optionalSubjects", config.OptionalSubjects), ("requiredSubjects", config.RequiredSubjects) })
             {
-                Warn($"overrides: sheets.\"{Name}\".optionalSubjects \"{optional}\" matched no subject");
+                foreach (var name in names.Where(o => !result.Subjects.Keys.Any(k => CellText.NameKey(k.Name) == CellText.NameKey(o))))
+                {
+                    Warn($"overrides: sheets.\"{Name}\".{list} \"{name}\" matched no subject");
+                }
             }
         }
 
@@ -634,13 +638,14 @@ public sealed partial class SheetParser(ImportOverrides overrides)
 
             _consumed.Add(header);
             _consumed.UnionWith(continuation);
-            var kinds = role == ColumnRole.Facultative ? mark.Kinds | ActivityKinds.Facultative : mark.Kinds;
-            var choice = role == ColumnRole.PickSlot ? SubjectChoice.PickSlot : SubjectChoice.Optional;
             foreach (var programme in AudienceOf(header))
             {
                 var (subjectName, shortName) = Resolve(programme, name, header, explicitName: false);
                 var subject = new SubjectKey(programme, config.Year, subjectName);
-                AddSubject(subject, shortName, choice, header);
+                // A required subject offered here (its labs listed with the optional ones): a time to pick.
+                var required = role == ColumnRole.PickSlot || _required.Contains(CellText.NameKey(subjectName));
+                var kinds = role == ColumnRole.Facultative && !required ? mark.Kinds | ActivityKinds.Facultative : mark.Kinds;
+                AddSubject(subject, shortName, required ? SubjectChoice.PickSlot : SubjectChoice.Optional, header);
                 foreach (var offer in written.Where(o => !o.Weeks.IsEmpty).Distinct())
                 {
                     result.Offers.Add(new ParsedOffer(subject, kinds, offer.Weekday, offer.StartsAt, offer.EndsAt, offer.Weeks,
