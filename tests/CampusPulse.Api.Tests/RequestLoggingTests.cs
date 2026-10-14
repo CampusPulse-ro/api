@@ -233,7 +233,20 @@ public sealed class CollectingLoggerProvider : ILoggerProvider, ISupportExternal
 {
     private IExternalScopeProvider _scopes = new LoggerExternalScopeProvider();
 
-    public List<Entry> Entries { get; } = [];
+    private readonly List<Entry> _entries = [];
+
+    /// <summary>A copy of what was logged so far. The app keeps logging on its own threads (background
+    /// services such as the sign-in metadata check) while a test reads, so never the live list.</summary>
+    public IReadOnlyList<Entry> Entries
+    {
+        get
+        {
+            lock (_entries)
+            {
+                return [.. _entries];
+            }
+        }
+    }
 
     /// <summary>A log entry; <see cref="ScopeValues"/> lists every scope value (outermost first),
     /// <see cref="Scope"/> the same as a dictionary where an inner scope wins.</summary>
@@ -272,9 +285,9 @@ public sealed class CollectingLoggerProvider : ILoggerProvider, ISupportExternal
                     }
                 }
             }, scope);
-            lock (owner.Entries)
+            lock (owner._entries)
             {
-                owner.Entries.Add(new Entry(category, logLevel, formatter(state, exception), exception, scope));
+                owner._entries.Add(new Entry(category, logLevel, formatter(state, exception), exception, scope));
             }
         }
     }
