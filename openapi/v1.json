@@ -147,10 +147,191 @@
           }
         ]
       }
+    },
+    "/me/devices": {
+      "post": {
+        "tags": [
+          "Push"
+        ],
+        "operationId": "RegisterPushDevice",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterDeviceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Push"
+        ],
+        "operationId": "UnregisterPushDevice",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnregisterDeviceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/me/notifications/test": {
+      "post": {
+        "tags": [
+          "Push"
+        ],
+        "operationId": "SendTestNotification",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestNotificationResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Bad Gateway",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
     }
   },
   "components": {
     "schemas": {
+      "DeviceResponse": {
+        "required": [
+          "id",
+          "platform",
+          "createdAt",
+          "lastRegisteredAt"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "platform": {
+            "$ref": "#/components/schemas/PushPlatform"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lastRegisteredAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "HealthResponse": {
         "required": [
           "status"
@@ -217,6 +398,50 @@
             ]
           }
         }
+      },
+      "PushPlatform": {
+        "enum": [
+          "android",
+          "ios"
+        ]
+      },
+      "RegisterDeviceRequest": {
+        "required": [
+          "token",
+          "platform"
+        ],
+        "type": "object",
+        "properties": {
+          "token": {
+            "type": "string"
+          },
+          "platform": {
+            "$ref": "#/components/schemas/PushPlatform"
+          }
+        }
+      },
+      "TestNotificationResponse": {
+        "required": [
+          "sent"
+        ],
+        "type": "object",
+        "properties": {
+          "sent": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "UnregisterDeviceRequest": {
+        "required": [
+          "token"
+        ],
+        "type": "object",
+        "properties": {
+          "token": {
+            "type": "string"
+          }
+        }
       }
     },
     "securitySchemes": {
@@ -234,6 +459,9 @@
     },
     {
       "name": "Users"
+    },
+    {
+      "name": "Push"
     }
   ]
 }
