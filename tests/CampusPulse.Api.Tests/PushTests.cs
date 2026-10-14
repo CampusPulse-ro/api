@@ -226,6 +226,7 @@ public sealed class PushTests(PostgresAppFactory factory) : IClassFixture<Postgr
 
         var interceptor = new DeleteBeforeUpdate(factory, token);
         using var app = factory.With(new StubPushHandler(), clock, null, interceptor);
+        clock.Advance(TimeSpan.FromMinutes(1));   // so registering again changes the row: an UPDATE
 
         var response = await Register(app.CreateClient(), oid, token);
 
