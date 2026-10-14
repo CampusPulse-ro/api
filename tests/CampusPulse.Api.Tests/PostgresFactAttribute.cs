@@ -24,3 +24,15 @@ public sealed class PostgresFactAttribute : FactAttribute
     public static string? ServerOrNull() =>
         Environment.GetEnvironmentVariable(Variable) is { Length: > 0 } value ? value : null;
 }
+
+/// <summary>The <see cref="PostgresFactAttribute"/> rules for a theory.</summary>
+public sealed class PostgresTheoryAttribute : TheoryAttribute
+{
+    public PostgresTheoryAttribute()
+    {
+        if (PostgresFactAttribute.ServerOrNull() is null && !PostgresFactAttribute.OnCi)
+        {
+            Skip = $"Needs Postgres: set {PostgresFactAttribute.Variable} (see PostgresFactAttribute).";
+        }
+    }
+}

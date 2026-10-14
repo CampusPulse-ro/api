@@ -1,6 +1,7 @@
 using CampusPulse.Infrastructure;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 
@@ -53,6 +54,7 @@ public sealed class PostgresAppFactory : WebApplicationFactory<Program>, IAsyncL
         builder.UseSetting("ConnectionStrings:Postgres", ConnectionString
             ?? throw new InvalidOperationException("No test database: the test should have been skipped."));
         TestAuth.Configure(builder);
+        builder.ConfigureTestServices(services => PushTesting.UseHandler(services, new NoNetworkHandler()));
     }
 
     async Task IAsyncLifetime.DisposeAsync()

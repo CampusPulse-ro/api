@@ -22,6 +22,76 @@ namespace CampusPulse.Infrastructure.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("CampusPulse.Domain.Push.PushDevice", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<DateTimeOffset>("LastRegisteredAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("last_registered_at");
+
+                    b.Property<string>("Platform")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("character varying(10)")
+                        .HasColumnName("platform");
+
+                    b.Property<string>("Token")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("token");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.HasKey("Id")
+                        .HasName("pk_push_devices");
+
+                    b.HasIndex("Token")
+                        .IsUnique()
+                        .HasDatabaseName("ix_push_devices_token");
+
+                    b.HasIndex("UserId", "LastRegisteredAt")
+                        .HasDatabaseName("ix_push_devices_user_id_last_registered_at");
+
+                    b.ToTable("push_devices", (string)null);
+                });
+
+            modelBuilder.Entity("CampusPulse.Domain.Push.PushReceiptPending", b =>
+                {
+                    b.Property<string>("TicketId")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("ticket_id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid>("DeviceId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("device_id");
+
+                    b.HasKey("TicketId")
+                        .HasName("pk_push_receipts_pending");
+
+                    b.HasIndex("CreatedAt")
+                        .HasDatabaseName("ix_push_receipts_pending_created_at");
+
+                    b.HasIndex("DeviceId")
+                        .HasDatabaseName("ix_push_receipts_pending_device_id");
+
+                    b.ToTable("push_receipts_pending", (string)null);
+                });
+
             modelBuilder.Entity("CampusPulse.Domain.Users.AccountDeletionCount", b =>
                 {
                     b.Property<DateOnly>("Day")
@@ -78,6 +148,26 @@ namespace CampusPulse.Infrastructure.Migrations
                         .HasDatabaseName("ix_users_entra_object_id");
 
                     b.ToTable("users", (string)null);
+                });
+
+            modelBuilder.Entity("CampusPulse.Domain.Push.PushDevice", b =>
+                {
+                    b.HasOne("CampusPulse.Domain.Users.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_push_devices_users_user_id");
+                });
+
+            modelBuilder.Entity("CampusPulse.Domain.Push.PushReceiptPending", b =>
+                {
+                    b.HasOne("CampusPulse.Domain.Push.PushDevice", null)
+                        .WithMany()
+                        .HasForeignKey("DeviceId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_push_receipts_pending_push_devices_device_id");
                 });
 #pragma warning restore 612, 618
         }

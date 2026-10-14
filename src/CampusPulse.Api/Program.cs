@@ -1,8 +1,10 @@
 using System.Reflection;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using CampusPulse.Api;
 using CampusPulse.Api.Auth;
 using CampusPulse.Api.Logging;
+using CampusPulse.Api.Push;
 using CampusPulse.Api.Users;
 using CampusPulse.Infrastructure;
 
@@ -24,16 +26,25 @@ builder.Services.AddCampusPulsePersistence(builder.Configuration,
 
 // JSON shapes the OpenAPI document (and so the generated TypeScript types) describes: integers
 // as numbers only (without Strict, .NET writes them as ["integer","string"] → `number | string`),
-// enums as their names (string unions in TypeScript).
+// enums as their camelCase names, like the properties (`"android" | "ios"` in TypeScript).
+// Request bodies are read as strictly as the contract describes them: an enum only by its name
+// (never a number), and every constructor parameter of a body record present.
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
     options.SerializerOptions.NumberHandling = JsonNumberHandling.Strict;
-    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false));
+    options.SerializerOptions.RespectRequiredConstructorParameters = true;
 });
+
+// A body that can't be read is a 400 in every environment (Development would throw instead).
+builder.Services.Configure<RouteHandlerOptions>(options => options.ThrowOnBadRequest = false);
 
 builder.Services.AddOpenApi(options => options.AddBearerSecurity());
 
 builder.Services.AddSingleton(TimeProvider.System);
+
+// Push notifications through Expo, and the background check of their receipts (see PushSetup).
+builder.Services.AddCampusPulsePush();
 
 // Microsoft sign-in (UPT accounts). Unconfigured, it fails closed: see AuthSetup.
 var auth = builder.Services.AddCampusPulseAuth(builder.Configuration);
@@ -66,6 +77,26 @@ if (auth is null && !writingOpenApiDocument)
 // Outermost, so the request's log line and its X-Request-Id cover the exception handler too.
 app.UseMiddleware<RequestLoggingMiddleware>();
 app.UseExceptionHandler();
+// A 400 with no body (a request body that couldn't be read: bad JSON, a missing field, an enum
+// value outside the contract) gets a ProblemDetails body like every other error. Other empty
+// statuses (401 from the token check, an unknown path's 404) stay as they are.
+app.UseStatusCodePages(async context =>
+{
+    var http = context.HttpContext;
+    if (http.Response.StatusCode == StatusCodes.Status400BadRequest)
+    {
+        await http.RequestServices.GetRequiredService<IProblemDetailsService>().WriteAsync(new ProblemDetailsContext
+        {
+            HttpContext = http,
+            ProblemDetails =
+            {
+                Status = StatusCodes.Status400BadRequest,
+                Title = "Bad request",
+                Detail = "The request body is missing, isn't JSON, or doesn't match the contract (/openapi/v1.json).",
+            },
+        });
+    }
+});
 app.UseCors();
 app.UseAuthentication();
 app.UseAuthorization();
@@ -123,6 +154,7 @@ app.MapGet("/health/ready", async (CampusPulseDbContext db, CancellationToken re
     .Produces<HealthResponse>(StatusCodes.Status503ServiceUnavailable);
 
 app.MapMe();
+app.MapPush();
 
 app.Run();
 

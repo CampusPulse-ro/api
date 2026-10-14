@@ -1,3 +1,4 @@
+using CampusPulse.Domain.Push;
 using CampusPulse.Domain.Users;
 using Microsoft.EntityFrameworkCore;
 
@@ -10,6 +11,10 @@ public sealed class CampusPulseDbContext(DbContextOptions<CampusPulseDbContext> 
     public DbSet<User> Users => Set<User>();
 
     public DbSet<AccountDeletionCount> AccountDeletionCounts => Set<AccountDeletionCount>();
+
+    public DbSet<PushDevice> PushDevices => Set<PushDevice>();
+
+    public DbSet<PushReceiptPending> PushReceiptsPending => Set<PushReceiptPending>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -33,6 +38,31 @@ public sealed class CampusPulseDbContext(DbContextOptions<CampusPulseDbContext> 
             count.ToTable("account_deletion_counts");
             count.HasKey(c => c.Day);
             count.Property(c => c.Day).ValueGeneratedNever();
+        });
+
+        modelBuilder.Entity<PushDevice>(device =>
+        {
+            device.ToTable("push_devices");
+            device.HasKey(d => d.Id);
+            device.Property(d => d.Id).ValueGeneratedNever();
+            device.HasOne<User>().WithMany().HasForeignKey(d => d.UserId).OnDelete(DeleteBehavior.Cascade);
+            device.Property(d => d.Token).HasMaxLength(PushDevice.TokenMaxLength).IsRequired();
+            // One row per app install: a token registered by another student moves to them.
+            device.HasIndex(d => d.Token).IsUnique();
+            // The per-student device cap drops the least recently registered.
+            device.HasIndex(d => new { d.UserId, d.LastRegisteredAt });
+            device.Property(d => d.Platform).HasMaxLength(10).HasConversion(
+                platform => platform == PushPlatform.Ios ? "ios" : "android",
+                code => code == "ios" ? PushPlatform.Ios : PushPlatform.Android);
+        });
+
+        modelBuilder.Entity<PushReceiptPending>(receipt =>
+        {
+            receipt.ToTable("push_receipts_pending");
+            receipt.HasKey(r => r.TicketId);
+            receipt.Property(r => r.TicketId).HasMaxLength(PushReceiptPending.TicketIdMaxLength).ValueGeneratedNever();
+            receipt.HasOne<PushDevice>().WithMany().HasForeignKey(r => r.DeviceId).OnDelete(DeleteBehavior.Cascade);
+            receipt.HasIndex(r => r.CreatedAt);
         });
     }
 }
