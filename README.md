@@ -104,6 +104,27 @@ dotnet ef migrations add <Name> --project src/CampusPulse.Infrastructure --start
   connection string from the environment (never in argv), before the new release goes live,
   so the Pi needs neither the SDK nor `dotnet-ef`.
 
+## Logs
+
+- **Format:** JSON lines on stdout (journald on the Pi), with UTC timestamps and the request id
+  in every line logged during a request.
+- **File:** when `Logging__File__Path` is set (the Pi's env files point it at
+  `/srv/campuspulse/logs/<env>/api.log`, the only folder the service can write), the same events
+  also go to that file as JSON lines, rolled at 10 MB, keeping 10 files
+  (`Logging__File__FileSizeLimitBytes`, `Logging__File__RetainedFileCountLimit`). The Pi's journald
+  keeps logs in RAM only, so the file is what survives a reboot. Locally it's off unless you set it.
+- **One line per request:** method, path (never the query string), status and duration.
+  `/health*` is logged at Debug, since deploys and monitoring call it constantly.
+- **Request id:** a caller's `X-Request-Id` is kept if it's 1–64 characters of letters, digits,
+  `.`, `_`, `-` or `:`; otherwise a new one is made. It is returned in `X-Request-Id` on every
+  response, so a client's bug report can be matched to its log lines.
+- **Errors:** an unhandled exception returns a ProblemDetails 500 whose `traceId` is the request id,
+  with no exception details; the exception and its stack trace are logged at Error.
+- **Reading them on the Pi:** `journalctl -u campuspulse-api-stage -o cat | jq`, or
+  `sudo tail -f /srv/campuspulse/logs/stage/api.log | jq`.
+- **Error reporting (Sentry):** not enabled. `Program.cs` marks where it would go; it would also need
+  an allow rule in the Pi's network guard.
+
 ## Tests
 
 ```bash

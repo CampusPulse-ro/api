@@ -1,9 +1,17 @@
 using System.Reflection;
 using System.Text.Json.Serialization;
 using CampusPulse.Api;
+using CampusPulse.Api.Logging;
 using CampusPulse.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// JSON logs to stdout, and to a rolling file when Logging:File:Path is set (see LoggingSetup).
+builder.AddCampusPulseLogging();
+
+// Optional error reporting (not enabled; his decision, CampusPulse-ro/api#10): Sentry would be
+// `builder.WebHost.UseSentry(o => o.Dsn = builder.Configuration["Sentry:Dsn"])` with the DSN in the
+// env file, plus an allow rule for its host in the Pi's network guard (deploy/pi/netguard.nft).
 
 // The build writes openapi/v1.json by running this file through GetDocument.Insider, with no
 // configuration and no database. The context is registered the same way there, just without
@@ -23,6 +31,13 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 
 builder.Services.AddOpenApi();
 
+// Unhandled exceptions become a ProblemDetails 500 whose traceId is the request id; the
+// exception itself is logged with its stack trace by the exception handler.
+builder.Services.AddProblemDetails(options => options.CustomizeProblemDetails = context =>
+    // Always the request id (X-Request-Id), never an Activity's W3C id, so a client's error report
+    // matches the log line.
+    context.ProblemDetails.Extensions["traceId"] = context.HttpContext.TraceIdentifier);
+
 // The web app calls the API from the browser. Origins per environment: Cors:AllowedOrigins
 // (see CorsOrigins). Bearer tokens, not cookies, so no credentials mode.
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
@@ -33,6 +48,9 @@ builder.Services.AddCors(options => options.AddDefaultPolicy(policy => policy
 
 var app = builder.Build();
 
+// Outermost, so the request id and the request's log line cover the exception handler too.
+app.UseMiddleware<RequestLoggingMiddleware>();
+app.UseExceptionHandler();
 app.UseCors();
 
 // Served in every environment, not only Development: this document is the contract the
