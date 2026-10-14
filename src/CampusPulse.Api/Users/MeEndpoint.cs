@@ -156,7 +156,7 @@ public static partial class MeEndpoint
         }
     }
 
-    private static ProblemHttpResult NoAccount() => TypedResults.Problem(
+    internal static ProblemHttpResult NoAccount() => TypedResults.Problem(
         statusCode: StatusCodes.Status404NotFound,
         title: "No account",
         detail: "This Microsoft account has no CampusPulse account: it was deleted or never created. Sign out; signing in again creates a new one.");
@@ -166,7 +166,7 @@ public static partial class MeEndpoint
     private static partial void LogAccountDeleted(ILogger logger);
 
     /// <summary>What the API takes from the validated token.</summary>
-    private sealed record Identity(string Oid, string? Email, string? Name)
+    internal sealed record Identity(string Oid, string? Email, string? Name)
     {
         public static Identity From(ClaimsPrincipal principal) => new(
             principal.FindFirst("oid")?.Value

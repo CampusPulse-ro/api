@@ -1,8 +1,10 @@
 using System.Reflection;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using CampusPulse.Api;
 using CampusPulse.Api.Auth;
 using CampusPulse.Api.Logging;
+using CampusPulse.Api.Push;
 using CampusPulse.Api.Users;
 using CampusPulse.Infrastructure;
 
@@ -24,16 +26,19 @@ builder.Services.AddCampusPulsePersistence(builder.Configuration,
 
 // JSON shapes the OpenAPI document (and so the generated TypeScript types) describes: integers
 // as numbers only (without Strict, .NET writes them as ["integer","string"] → `number | string`),
-// enums as their names (string unions in TypeScript).
+// enums as their camelCase names, like the properties (`"android" | "ios"` in TypeScript).
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
     options.SerializerOptions.NumberHandling = JsonNumberHandling.Strict;
-    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
 });
 
 builder.Services.AddOpenApi(options => options.AddBearerSecurity());
 
 builder.Services.AddSingleton(TimeProvider.System);
+
+// Push notifications through Expo, and the background check of their receipts (see PushSetup).
+builder.Services.AddCampusPulsePush();
 
 // Microsoft sign-in (UPT accounts). Unconfigured, it fails closed: see AuthSetup.
 var auth = builder.Services.AddCampusPulseAuth(builder.Configuration);
@@ -123,6 +128,7 @@ app.MapGet("/health/ready", async (CampusPulseDbContext db, CancellationToken re
     .Produces<HealthResponse>(StatusCodes.Status503ServiceUnavailable);
 
 app.MapMe();
+app.MapPush();
 
 app.Run();
 
