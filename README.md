@@ -32,7 +32,8 @@ Environment variables only:
 | `Logging__LogLevel__<category>` | the usual .NET log levels, for stdout and the file alike; defaults in `appsettings.json` (Information, `Microsoft.AspNetCore` at Warning) |
 | `Auth__TenantId` | UPT's Entra tenant id (`6bb41fe4-40a3-4a10-b6cd-38278e78b21a`). With `Auth__ClientId` unset too, sign-in is off and every endpoint that needs it answers 401 (see Sign-in) |
 | `Auth__ClientId` | the app registration's client id (one registration for web, mobile and the API) |
-| `HTTPS_PROXY`, `NO_PROXY` | on the Pi, the egress proxy the API reaches Microsoft through (see Sign-in) |
+| `HTTPS_PROXY`, `NO_PROXY` | on the Pi, the egress proxy the API reaches Microsoft and Expo through (see Sign-in, Push notifications) |
+| `Push__Expo__AccessToken` | optional: an Expo access token, sent as `Authorization: Bearer` to Expo's push API. Needed only once "enhanced security for push notifications" is turned on for the Expo project |
 
 ## Sign-in
 
@@ -153,8 +154,9 @@ clients follow `main`.
 
 - Write response DTOs as positional records (`record HealthResponse(string Status)`) or with
   `required` members; otherwise their fields come out optional (`?`) in TypeScript.
-- Integers are serialized as numbers only (`JsonNumberHandling.Strict`) and enums by name
-  (`JsonStringEnumConverter`), so they become `number` and string unions, not `number | string`.
+- Integers are serialized as numbers only (`JsonNumberHandling.Strict`) and enums by their
+  camelCase name (`JsonStringEnumConverter` with `JsonNamingPolicy.CamelCase`: `PushPlatform.Ios` is
+  `"ios"`), so they become `number` and string unions, not `number | string`.
 - Declare every response (`.Produces<T>()`, `.Produces<T>(503)`) so clients get a type for it.
 
 ## Data
@@ -172,6 +174,10 @@ clients follow `main`.
 - **Per-user data must refer to `users` by foreign key.** A column that only stores the oid or the
   email, with no foreign key, isn't covered: nothing deletes it. Data that can't have a key (a file,
   another service) needs its own step in `AccountDeletion`, added in the same PR as the data.
+- `push_devices`: a student's phones, by Expo push token (unique), with platform and first and last
+  registration (see [Push notifications](#push-notifications)). `push_receipts_pending`: tickets of
+  sent notifications whose receipt hasn't been read yet, under their device. Both are in the cascade
+  tree: `users` → `push_devices` → `push_receipts_pending`.
 - `account_deletion_counts`: the number of accounts deleted per UTC day, added to in the same
   transaction as the delete. It holds no identifier. The deletion's log line (`Account deleted`)
   names no one either, but like every line of the request it carries the request's scope: request
@@ -180,6 +186,57 @@ clients follow `main`.
   monthly copies, plus a weekly copy on a second machine. A deleted account's row therefore
   survives in backups for up to about a year after the delete.
   - Open: whether to shorten that retention for this database (the owner's decision).
+
+## Push notifications
+
+Sent through [Expo's push service](https://docs.expo.dev/push-notifications/sending-notifications/)
+(`IPushSender`, implemented by `ExpoPushSender`; FCM/APNs directly would be another implementation).
+Every endpoint needs sign-in, and the first and last need an account (404 like `GET /me` otherwise).
+
+- `POST /me/devices` `{ token, platform }` (`platform` is `"android"` or `"ios"`): registers the
+  app's Expo push token for the student. **201** when it's new, **200** when it was known (its
+  last-registered time is refreshed). **400** ProblemDetails unless `token` looks like
+  `ExponentPushToken[…]` or `ExpoPushToken[…]` (letters, digits, `_`, `-`). A token registered by
+  another student moves to this one (another student signed in on the same phone). A student
+  keeps at most **10** devices: registering an 11th drops the least recently registered.
+- `DELETE /me/devices` `{ token }`: forgets that device. **204** always, also for a token that isn't
+  the student's (nothing happens), so the answer doesn't tell whose a token is. The token goes in the
+  body, not the path, because paths are logged here and by the reverse proxy, and push tokens never
+  are.
+- `POST /me/notifications/test`: sends "CampusPulse test notification" to the student's devices and
+  answers `{ sent }`, the number the push service accepted it for. Once a minute per student:
+  **429** with `Retry-After` otherwise. The limit is kept **in memory**, so a restart forgets it and
+  each API instance would count on its own. **502** when the push service can't be used at all.
+
+**What the clients do:**
+- Register (`POST /me/devices`) after `POST /me` and whenever the Expo push token changes
+  (`addPushTokenListener`).
+- Delete it (`DELETE /me/devices`) on sign-out, before dropping the access token.
+- `DELETE /me` removes every device with the account.
+
+**Sending, tickets and receipts:**
+- Messages go to Expo in batches of 100, through a typed HttpClient with a 15 s timeout.
+- Expo answers each message with a ticket. A `DeviceNotRegistered` ticket (the app was uninstalled)
+  deletes that device at once. An accepted one is kept in `push_receipts_pending`.
+- A background service (`PushReceiptChecker`) runs every 15 minutes. It reads the receipts of the
+  tickets that are at least 15 minutes old (in batches of 300), deletes the devices whose receipt
+  is `DeviceNotRegistered`, and drops every answered row and any row older than 24 hours. With
+  nothing pending, a pass is one query.
+
+**Logs** carry counts and Expo's error codes (`DeviceNotRegistered`, `MessageTooBig`…) only, never a
+push token, user id or email. Expo's own error texts quote the token, so they're never kept.
+
+**Network:** the push client sets no proxy of its own. It uses
+[`HttpClient.DefaultProxy`](https://learn.microsoft.com/dotnet/api/system.net.http.httpclient.defaultproxy),
+which on Linux comes from `HTTPS_PROXY` / `NO_PROXY`; a test checks the handler keeps that
+default. So on the Pi it goes through the egress proxy, whose allow list has `exp.host`
+(`deploy/pi/egress-allow`; installing it on the Pi is a manual step, see
+[deploy/pi/README.md](deploy/pi/README.md#egress-proxy)).
+
+**Android needs an FCM key at Expo (not part of this API):** Expo delivers to Android through
+Firebase Cloud Messaging, so an FCM V1 service account key has to be uploaded to EAS for the app's
+Android credentials (`eas credentials`). Sebastian does that. Until then Expo can't deliver to
+Android: expect an `InvalidCredentials` error on the ticket or on its receipt, in the logs.
 
 ## Database migrations
 
