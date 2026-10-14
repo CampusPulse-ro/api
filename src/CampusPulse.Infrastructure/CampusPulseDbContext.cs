@@ -9,6 +9,8 @@ public sealed class CampusPulseDbContext(DbContextOptions<CampusPulseDbContext> 
 {
     public DbSet<User> Users => Set<User>();
 
+    public DbSet<AccountDeletionCount> AccountDeletionCounts => Set<AccountDeletionCount>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<User>(user =>
@@ -22,6 +24,15 @@ public sealed class CampusPulseDbContext(DbContextOptions<CampusPulseDbContext> 
             user.HasIndex(u => u.EntraObjectId).IsUnique();
             user.Property(u => u.Email).HasMaxLength(User.EmailMaxLength).IsRequired();
             user.Property(u => u.DisplayName).HasMaxLength(User.DisplayNameMaxLength).IsRequired();
+            // Every table holding a student's data refers to this one with ON DELETE CASCADE, so
+            // deleting the row deletes the account (AccountDeletion). A test fails otherwise.
+        });
+
+        modelBuilder.Entity<AccountDeletionCount>(count =>
+        {
+            count.ToTable("account_deletion_counts");
+            count.HasKey(c => c.Day);
+            count.Property(c => c.Day).ValueGeneratedNever();
         });
     }
 }

@@ -56,8 +56,23 @@ Anything else is 401, logged at Warning with the reason (never the token).
 
 - **Who gets in:** every member of the tenant, students and staff alike. Students only would need a
   further rule (for example on the account's domain or a group); that's a product decision.
-- `GET /me` returns the signed-in student `{ id, email, displayName }`. The first call creates the
-  student (keyed by `oid`); later calls refresh email and name when the token carries them.
+- `POST /me` creates the signed-in student's account (keyed by `oid`), or returns the one they
+  have: **201** when it was created, **200** when it existed, with the body `{ id, email,
+  displayName }` either way.
+- `GET /me` returns that same body, and **never creates an account**: no account answers **404**
+  (ProblemDetails). Both refresh email and name when the token carries them.
+- `DELETE /me` deletes the signed-in student's account and everything stored about them (see
+  [Data](#data)) and answers **204**, also when there was nothing to delete, so retrying is safe.
+- **What clients must do:**
+  - Call `POST /me` once, right after an **interactive** sign-in. Never on app start or after a
+    silent token refresh. Otherwise a second device that still holds tokens would silently re-create
+    an account the student deleted on the first.
+  - Treat a **404 from `GET /me`** as "this account no longer exists" (deleted, maybe from another
+    device): sign out locally, drop cached data and show sign-in.
+  - After a **204 from `DELETE /me`**, sign out locally right away: drop the tokens and the cached
+    data. The access token stays valid until it expires.
+  - Send a random `X-Request-Id` per request, or none, never one fixed per install: a stable id
+    would tie all of a student's log lines together, a deleted student's included.
 - **Unconfigured** (no `Auth__TenantId` / `Auth__ClientId`): the API still starts and logs a
   warning, and every endpoint that needs sign-in answers 401. It never lets a request through
   anonymously.
@@ -141,6 +156,30 @@ clients follow `main`.
 - Integers are serialized as numbers only (`JsonNumberHandling.Strict`) and enums by name
   (`JsonStringEnumConverter`), so they become `number` and string unions, not `number | string`.
 - Declare every response (`.Produces<T>()`, `.Produces<T>(503)`) so clients get a type for it.
+
+## Data
+
+- `users`: one row per student who has signed in (`oid`, email, name, first and last seen).
+- **Everything about a student refers to their `users` row with ON DELETE CASCADE.** `DELETE /me`
+  deletes that row, and the database deletes the rest with it: settings, device push tokens,
+  Campus Virtual tokens, any later table. In EF that's `.OnDelete(DeleteBehavior.Cascade)`, the
+  default for a required relationship; `ClientCascade` is not enough, because the delete doesn't
+  go through EF's change tracker. The rule covers the whole tree under `users`: a table that
+  refers to a per-user table (device tokens under devices) cascades from it too.
+  `PerUserDataTests` fails the test run if any key on a path from `users` doesn't cascade, both in
+  the EF model and in the migrated database (`pg_constraint`), so a key written by hand in a
+  migration is checked too.
+- **Per-user data must refer to `users` by foreign key.** A column that only stores the oid or the
+  email, with no foreign key, isn't covered: nothing deletes it. Data that can't have a key (a file,
+  another service) needs its own step in `AccountDeletion`, added in the same PR as the data.
+- `account_deletion_counts`: the number of accounts deleted per UTC day, added to in the same
+  transaction as the delete. It holds no identifier. The deletion's log line (`Account deleted`)
+  names no one either, but like every line of the request it carries the request's scope: request
+  id, trace and span ids, connection id and path.
+- **Backups:** the production backups dump this database nightly and keep 7 daily, 5 weekly and 12
+  monthly copies, plus a weekly copy on a second machine. A deleted account's row therefore
+  survives in backups for up to about a year after the delete.
+  - Open: whether to shorten that retention for this database (the owner's decision).
 
 ## Database migrations
 
