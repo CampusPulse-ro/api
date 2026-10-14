@@ -1,8 +1,7 @@
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
 
 namespace CampusPulse.Api.Tests;
 
@@ -31,7 +30,7 @@ public sealed class StartupTests
         Assert.Contains("ConnectionStrings__Postgres is not set", exception.ToString());
     }
 
-    private sealed class LoggingFactory(CollectingLoggerProvider logs) : WebApplicationFactory<Program>
+    private sealed class SignInFactory : WebApplicationFactory<Program>
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -39,22 +38,20 @@ public sealed class StartupTests
             builder.UseSetting("ConnectionStrings:Postgres",
                 "Host=127.0.0.1;Port=1;Database=unused;Username=unused;Password=unused;Timeout=2");
             TestAuth.Configure(builder);
-            builder.ConfigureTestServices(services => services.AddSingleton<ILoggerProvider>(logs));
         }
     }
 
-    /// <summary>Data Protection comes with AddAuthentication but protects nothing here; it is
-    /// ephemeral on purpose and must not warn about unpersisted keys at every start (#39).</summary>
+    /// <summary>Data Protection comes with AddAuthentication but protects nothing here (bearer tokens
+    /// only), so its keys are ephemeral on purpose. Left to its defaults, a service user with no home
+    /// directory (the Pi's) gets an in-memory key repository and three warnings at every start (#39).
+    /// The warnings themselves can't be reproduced here: a test process has a home directory, so the
+    /// defaults pick a file repository instead. This pins the configuration that avoids them.</summary>
     [Fact]
-    public async Task A_start_logs_no_Data_Protection_warnings()
+    public async Task Data_Protection_is_ephemeral_by_design()
     {
-        var logs = new CollectingLoggerProvider();
-        using var factory = new LoggingFactory(logs);
-
-        // A request, so the app (and its hosted services) has fully started.
+        using var factory = new SignInFactory();
         await factory.CreateClient().GetAsync("/health");
 
-        Assert.DoesNotContain(logs.Entries, e =>
-            e.Category.StartsWith("Microsoft.AspNetCore.DataProtection", StringComparison.Ordinal) && e.Level >= LogLevel.Warning);
+        Assert.IsType<EphemeralDataProtectionProvider>(factory.Services.GetRequiredService<IDataProtectionProvider>());
     }
 }
