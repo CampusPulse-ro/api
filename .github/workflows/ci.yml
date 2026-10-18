@@ -91,6 +91,10 @@ jobs:
       - name: Test
         run: dotnet test --no-build -c Release
 
+      # scripts/campus-virtual-courses.py (standard library only), against invented catalogs.
+      - name: Script tests
+        run: python3 -m unittest discover -s scripts/tests -v
+
   publish:
     name: publish (framework-dependent)
     runs-on: ubuntu-latest

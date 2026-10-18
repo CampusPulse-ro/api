@@ -1,0 +1,14 @@
+# --- campusVirtual: written by scripts/campus-virtual-courses.py on 2030-09-01; entries marked hand: true survive its next run
+campusVirtual:
+  # Invented: the test fixture of TimetableParserTests and test_campus_virtual_courses.py.
+  search: ["S1-X-FAC"]
+  codes: {"ALFA": ["ALFA", "ALFAX"]}
+  courses:
+    "ALFA":
+      1:
+        "GEOMETRIA fractalilor": { id: 4101, shortname: "S1-X-FAC-ALFA1-GF" }
+        # By hand: no course of its own.
+        "Logica senzorilor virtuali": { hand: true }
+        "Nimic de acest fel": { id: 4103, shortname: "S1-X-FAC-ALFA1-N" }
+        "Pedagogia jocului": { id: 4102, shortname: "S1-X-FAC-PJ" }
+# --- end campusVirtual

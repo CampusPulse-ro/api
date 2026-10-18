@@ -377,6 +377,10 @@ namespace CampusPulse.Infrastructure.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("id");
 
+                    b.Property<int?>("CampusVirtualCourseId")
+                        .HasColumnType("integer")
+                        .HasColumnName("campus_virtual_course_id");
+
                     b.Property<string>("Choice")
                         .IsRequired()
                         .HasMaxLength(10)

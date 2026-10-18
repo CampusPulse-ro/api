@@ -296,6 +296,8 @@ week parity.
 Clients: read the student's group from `GET /me/settings` after `POST /me`. With no group, send them to
 the picker. With `noLongerOffered` (a newer timetable doesn't have it) or `fromAnotherSemester` (a new
 semester was imported), ask them to pick again. A chosen subject with `noLongerOffered` is shown as such.
+Every class, subject and room entry carries `campusVirtualUrl`: the subject's course page on Campus Virtual
+(cv.upt.ro), or null when it has none we know of. Link to it as given; don't build the URL.
 
 ## Database migrations
 

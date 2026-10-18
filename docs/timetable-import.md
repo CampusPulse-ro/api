@@ -190,6 +190,15 @@ cells:                        # by the cell's top-left "Sheet!A1"
   # also: skip, asNote, subject, start, room, teacher, note
 rooms:
   K210: { building: "North", floor: "2", capacity: 120 }
+
+campusVirtual:                # each subject's Campus Virtual course: see "Campus Virtual courses" below
+  search: ["S1-X-FAC"]        # the catalog's shortname prefixes (the script's input)
+  codes: { ALFA: [ALFA, COMUN] }   # programme -> its codes in shortnames (default: the code without punctuation)
+  courses:                    # programme -> year -> subject name (as the import reads it) -> its course
+    ALFA:
+      1:
+        "Geometria fractalilor": { id: 4101, shortname: "S1-X-FAC-ALFA1-GF" }
+        "Logica senzorilor virtuali": { id: 4105, hand: true }   # set by hand; the script keeps it
 ```
 
 An override whose `text` doesn't match the cell is ignored with a warning (the address moved in a newer
@@ -202,3 +211,61 @@ Column roles:
   for everyone.
 - **notes:** text shown with the timetable.
 - **grid:** a column of the grid. A sheet without group columns uses this for its own.
+
+## Campus Virtual courses
+
+Each subject can link to its course on Campus Virtual (cv.upt.ro, UPT's Moodle): the timetable endpoints
+give every class and subject a `campusVirtualUrl` (`https://cv.upt.ro/course/view.php?id=<id>`, null when
+the subject has no known course). The import takes the course ids from the overrides' `campusVirtual`
+section and stores them on the subjects (`Subject.CampusVirtualCourseId`). The import never reaches
+cv.upt.ro itself: the Pi's egress guard allows only sign-in and push.
+
+`scripts/campus-virtual-courses.py` (Python, standard library only) writes that section once per semester:
+
+```bash
+# 1. The subjects the import reads, as JSON (no database; wherever the API builds):
+dotnet run --project src/CampusPulse.Api -- import-timetable --overrides ../private/overrides.yaml --parse-only \
+    --subjects-json ../private/subjects.json ../private/*.xlsx
+# 2. Match them to the catalog and rewrite the campusVirtual section (--dry-run prints it and writes nothing):
+python3 scripts/campus-virtual-courses.py --subjects ../private/subjects.json --overrides ../private/overrides.yaml \
+    --env-file ../private/moodle.env
+# 3. Import as usual. The overrides changed, so no --force is needed.
+```
+
+- **The export is of one file:** it records the overrides' SHA-256, and the script refuses to rewrite a file
+  that changed since (export again). So edit the file, then export, then run the script. `--subjects-json` is
+  not written when a sheet has errors.
+- **The token:** any student's `moodle_mobile_app` token, as `MOODLE_TOKEN` in the environment or in the
+  `--env-file` (`KEY=VALUE` lines). The script calls only the read-only `core_course_search_courses`, sends
+  the token in the body of an https POST to cv.upt.ro and nowhere else (a `MOODLE_URL` naming another host is
+  refused), and never prints or writes it.
+- **The search:** every course whose shortname starts with one of `campusVirtual.search` and a dash. Write
+  `search` (and `codes`, where a programme's courses sit under more than one code) by hand once; the import
+  checks their shape and the script keeps them.
+- **The matching:** a shortname names the programme and year after the prefix
+  (`S1-X-FAC-ALFA1-O-GF` is ALFA, year 1). A subject is matched among the courses of its programme's codes
+  and year:
+  - 1.0: the same name, ignoring case, diacritics, a note in brackets and a series suffix (roman numerals
+    read as digits);
+  - 0.95: the course's abbreviation is the subject's name (`LSV`) or the one the sheet uses (3 letters or more);
+  - 0.9: the subject's words abbreviate the course's, one for one (`Secu. aplic. mobile`);
+  - 0.85: all the words of one name are in the other; 0.8 and up: the spelling, but only when every word of the
+    subject's is in the course's name, maybe misspelt.
+
+  Names with different numbers (`1` and `2`, `I` and `II`) never match. Two courses within 0.05 of each other,
+  or one placed by abbreviation alone against one that fits by name, make the subject ambiguous. A subject it
+  can't place among its own courses gets another programme's course only under exactly its name, at the same
+  level (search prefix), and of the same year or of no programme (a course two programmes share).
+- **What it prints:** the counts (matched, ambiguous, unmatched, kept by hand), **every match under 1.0 with
+  its score** (check those), the matches to another programme's course, the subjects left out, and what changed
+  against the file (`-` entries gone, `~` entries whose course changed). *Ambiguous* means two courses fit
+  equally well (one per series, say); *unmatched* means none does. Neither gets an entry.
+- **By hand:** an entry with `hand: true` is kept as it is on the next run. Use it to pick one of an
+  ambiguous subject's courses, to link an unmatched one, to correct a wrong match, or, without an `id`, to say a
+  subject has no course. Comments inside the section are kept: one above an entry stays with it.
+- **The file** is replaced in one step, the previous version kept as `overrides.yaml.bak`.
+- **The import** prints `-- Campus Virtual: N of M subjects have a course` with the subjects that have none,
+  and adds the count to the run's summary. An entry naming no subject of its programme's year is warned
+  (the subject's name changed). Unknown keys are refused here too.
+- **Tests:** `python3 -m unittest discover -s scripts/tests` (run by CI), against invented catalogs.
+  `scripts/tests/fixtures/campus-virtual-section.yaml` is the script's output, and the .NET tests parse it.

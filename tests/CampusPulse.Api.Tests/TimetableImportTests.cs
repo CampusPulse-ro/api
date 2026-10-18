@@ -123,6 +123,56 @@ public sealed class TimetableImportTests(PostgresAppFactory factory) : IClassFix
     }
 
     [PostgresFact]
+    public async Task Subjects_get_their_Campus_Virtual_course_and_a_changed_mapping_updates_it()
+    {
+        using var workbook = TimetableParserTests.Workbook();
+        var yaml = OverridesFor("2042-2043") + "\n" + TimetableParserTests.CampusVirtualSection;
+
+        var (exit, output) = await Import(yaml, [(workbook, "orar.xlsx")]);
+
+        Assert.Equal(ImportExit.Done, exit);
+        var subjects = File(ImportOverrides.Parse(yaml), workbook).Parsed.Subjects.Count;
+        Assert.Contains($"; {subjects - 2} subjects without a Campus Virtual course.", output);
+        Assert.Equal(4101, await CourseOf("2042-2043", "Geometria fractalilor"));
+        Assert.Equal(4102, await CourseOf("2042-2043", "Pedagogia jocului"));
+        Assert.Null(await CourseOf("2042-2043", "Logica senzorilor virtuali"));
+
+        // A corrected mapping: the overrides changed, so the same workbook is imported again.
+        var (again, againOutput) = await Import(yaml.Replace("id: 4101", "id: 4201"), [(workbook, "orar.xlsx")], overridesSha: "overrides-2");
+
+        Assert.Equal(ImportExit.Done, again);
+        Assert.Contains("   - ALFA y1 Geometria fractalilor [Fixed] cv:4101", againOutput);
+        Assert.Contains("   + ALFA y1 Geometria fractalilor [Fixed] cv:4201", againOutput);
+        Assert.Equal(4201, await CourseOf("2042-2043", "Geometria fractalilor"));
+    }
+
+    [PostgresFact]
+    public async Task A_removed_entry_or_a_hand_entry_without_an_id_clears_the_course()
+    {
+        using var workbook = TimetableParserTests.Workbook();
+        var yaml = OverridesFor("2043-2044") + "\n" + TimetableParserTests.CampusVirtualSection;
+        Assert.Equal(ImportExit.Done, (await Import(yaml, [(workbook, "orar.xlsx")])).Exit);
+        Assert.Equal((4101, 4102), (await CourseOf("2043-2044", "Geometria fractalilor"), await CourseOf("2043-2044", "Pedagogia jocului")));
+
+        const string Geometry = "        \"GEOMETRIA fractalilor\": { id: 4101, shortname: \"S1-X-FAC-ALFA1-GF\" }\n";
+        const string Pedagogy = "\"Pedagogia jocului\": { id: 4102, shortname: \"S1-X-FAC-PJ\" }";
+        Assert.Contains(Geometry, yaml);
+        Assert.Contains(Pedagogy, yaml);
+        var changed = yaml.Replace(Geometry, "").Replace(Pedagogy, "\"Pedagogia jocului\": { hand: true }");
+
+        Assert.Equal(ImportExit.Done, (await Import(changed, [(workbook, "orar.xlsx")], overridesSha: "overrides-2")).Exit);
+        Assert.Null(await CourseOf("2043-2044", "Geometria fractalilor"));
+        Assert.Null(await CourseOf("2043-2044", "Pedagogia jocului"));
+    }
+
+    private async Task<int?> CourseOf(string academicYear, string subject)
+    {
+        await using var db = factory.CreateDbContext();
+        var semester = await db.Semesters.SingleAsync(s => s.AcademicYear == academicYear);
+        return await db.Subjects.Where(s => s.SemesterId == semester.Id && s.Name == subject).Select(s => s.CampusVirtualCourseId).SingleAsync();
+    }
+
+    [PostgresFact]
     public async Task A_renamed_file_replaces_what_it_brought_instead_of_doubling_it()
     {
         using var first = TimetableParserTests.Workbook();

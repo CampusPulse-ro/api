@@ -191,6 +191,12 @@ public sealed class TimetableParserTests
           "An 1!Z99": { skip: true }
         """;
 
+    /// <summary>A campusVirtual section to append to <see cref="Overrides"/>: scripts/tests/fixtures/campus-virtual-section.yaml,
+    /// which the script's own tests check is what it writes. Two ALFA year 1 subjects with a course (one named in other
+    /// case), a hand entry saying one has none, an entry naming no subject, and comments.</summary>
+    internal static readonly string CampusVirtualSection =
+        File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "campus-virtual-section.yaml"));
+
     /// <param name="withSeries2">false drops series Y (its group columns and cells), as a later file might.</param>
     /// <param name="facultativeTimes">the facultative subject's offered times.</param>
     /// <param name="facultativeName">the facultative subject's name.</param>
@@ -650,6 +656,55 @@ public sealed class TimetableParserTests
         Assert.Contains("none of its sheets", none);
     }
 
+    [Fact]
+    public void Campus_Virtual_courses_go_on_their_subjects_by_name_and_the_printout_counts_those_without()
+    {
+        var parsed = Parse(Overrides + "\n" + CampusVirtualSection);
+
+        Assert.Equal(4101, parsed.Subjects[new SubjectKey("ALFA", 1, "Geometria fractalilor")].CampusVirtualCourseId);
+        Assert.Equal(4102, parsed.Subjects[new SubjectKey("ALFA", 1, "Pedagogia jocului")].CampusVirtualCourseId);
+        Assert.Null(parsed.Subjects[new SubjectKey("ALFA", 1, "Logica senzorilor virtuali")].CampusVirtualCourseId);
+        Assert.Contains("overrides: campusVirtual.courses.ALFA.1.\"Nimic de acest fel\" matches no subject", parsed.Warnings);
+
+        var output = new StringWriter();
+        TimetableImporter.PrintDiff(TimetableImporter.Snapshot.Empty, new ImportFile("orar", "orar.xlsx", "-", parsed), output);
+        var text = output.ToString();
+        Assert.Contains($"-- Campus Virtual: 2 of {parsed.Subjects.Count} subjects have a course, {parsed.Subjects.Count - 2} have none", text);
+        Assert.Contains("   ? ALFA y1 Logica senzorilor virtuali\n", text.ReplaceLineEndings("\n"));
+        Assert.Contains("   + ALFA y1 Geometria fractalilor [Fixed] cv:4101\n", text.ReplaceLineEndings("\n"));
+    }
+
+    [Fact]
+    public void Without_Campus_Virtual_courses_nothing_is_linked_or_counted()
+    {
+        var parsed = Parse();
+
+        Assert.False(parsed.CampusVirtualListed);
+        Assert.All(parsed.Subjects.Values, s => Assert.Null(s.CampusVirtualCourseId));
+    }
+
+    [Theory]
+    [InlineData("{ courses: { ZETA: { 1: { \"Geometria fractalilor\": { id: 1 } } } } }", "names programme ZETA, which programmes doesn't list")]
+    [InlineData("{ codes: { ZETA: [ZETA] } }", "names programme ZETA")]
+    [InlineData("{ codes: { ALFA: [\"AL-FA\"] } }", "campusVirtual.codes \"AL-FA\" isn't a programme code")]
+    [InlineData("{ search: [\"S1-X-FAC-\"] }", "campusVirtual.search \"S1-X-FAC-\" isn't a shortname prefix")]
+    [InlineData("{ search: [\"S1 X\"] }", "campusVirtual.search \"S1 X\" isn't a shortname prefix")]
+    [InlineData("{ courses: { ALFA: { 9: { \"Geometria fractalilor\": { id: 1 } } } } }", "campusVirtual.courses.ALFA: year 9 isn't 1-6")]
+    [InlineData("{ courses: { ALFA: { 1: { \"Geometria fractalilor\": { id: 0 } } } } }", "needs a course id above 0")]
+    [InlineData("{ courses: { ALFA: { 1: { \"Geometria fractalilor\": { shortname: \"S1-X\" } } } } }", "needs a course id above 0")]
+    [InlineData("{ courses: { ALFA: { 1: { \"Geometria fractalilor\": { id: 1 }, \"GEOMETRIA FRACTALILOR\": { id: 2 } } } } }", "is listed twice")]
+    public void Bad_campus_virtual_sections_are_refused(string section, string message)
+    {
+        var error = Assert.Throws<FormatException>(() => ImportOverrides.Parse(Overrides + "\ncampusVirtual: " + section));
+        Assert.Contains(message, error.Message);
+    }
+
+    [Theory]
+    [InlineData("{ courses: { ALFA: { 1: { \"Geometria fractalilor\": { id: 1, url: \"x\" } } } } }")]
+    [InlineData("{ links: {} }")]
+    public void Unknown_campus_virtual_keys_are_refused(string section) =>
+        Assert.Throws<YamlDotNet.Core.YamlException>(() => ImportOverrides.Parse(Overrides + "\ncampusVirtual: " + section));
+
     /// <summary>
     /// <see cref="SheetParser.Version"/> decides whether an unchanged workbook is imported again. This pins it
     /// to what the parser reads from the test workbook: a change in what it reads changes the hash and fails
@@ -679,6 +734,7 @@ public sealed class ImportTimetableCommandTests : IDisposable
     [InlineData("--overrides", "o.yaml")]
     [InlineData("--overrides", "o.yaml", "--dry-run", "--parse-only", "a.xlsx")]
     [InlineData("--overrides", "o.yaml", "--frobnicate", "a.xlsx")]
+    [InlineData("--overrides", "o.yaml", "a.xlsx", "--subjects-json")]
     public async Task Usage_errors_exit_64(params string[] args)
     {
         var error = new StringWriter();
@@ -712,6 +768,55 @@ public sealed class ImportTimetableCommandTests : IDisposable
         Assert.Contains("! An 1!K61: one hour", text);
         Assert.Contains("! overrides: sheets.\"Orfan\" is in no source, so nothing reads it", text);
         Assert.Contains("Parse only: no database was read or written.", text);
+    }
+
+    [Fact]
+    public async Task Subjects_json_lists_the_subjects_read_and_the_campus_virtual_section_for_the_script()
+    {
+        var (_, workbook) = await Files();
+        var overrides = Path.Combine(_dir, "with-campus-virtual.yaml");
+        await File.WriteAllTextAsync(overrides, TimetableParserTests.Overrides + "\n" + TimetableParserTests.CampusVirtualSection);
+        var json = Path.Combine(_dir, "subjects.json");
+
+        var exit = await ImportTimetableCommand.RunAsync(["--overrides", overrides, "--parse-only", "--subjects-json", json, workbook],
+            TextWriter.Null, TextWriter.Null);
+
+        Assert.Equal(0, exit);
+        using var document = System.Text.Json.JsonDocument.Parse(await File.ReadAllTextAsync(json));
+        var root = document.RootElement;
+        Assert.Equal(ImportTimetableCommand.Sha256(await File.ReadAllBytesAsync(overrides)), root.GetProperty("overridesSha256").GetString());
+        Assert.Equal(["S1-X-FAC"], root.GetProperty("search").EnumerateArray().Select(e => e.GetString()));
+        Assert.Equal(["ALFA", "ALFAX"], root.GetProperty("codes").GetProperty("ALFA").EnumerateArray().Select(e => e.GetString()));
+        var course = root.GetProperty("courses").GetProperty("ALFA").GetProperty("1").GetProperty("GEOMETRIA fractalilor");
+        Assert.Equal((4101, "S1-X-FAC-ALFA1-GF", false),
+            (course.GetProperty("id").GetInt32(), course.GetProperty("shortname").GetString(), course.GetProperty("hand").GetBoolean()));
+        Assert.Contains("MDATA", root.GetProperty("programmes").EnumerateArray().Select(e => e.GetString()));
+        var subjects = root.GetProperty("subjects").EnumerateArray().ToList();
+        var lsv = Assert.Single(subjects, s => s.GetProperty("name").GetString() == "Logica senzorilor virtuali");
+        Assert.Equal(("orar", "ALFA", 1, "LSV", "Fixed"), (lsv.GetProperty("source").GetString(), lsv.GetProperty("programme").GetString(),
+            lsv.GetProperty("year").GetInt32(), lsv.GetProperty("shortName").GetString(), lsv.GetProperty("choice").GetString()));
+    }
+
+    [Fact]
+    public async Task Subjects_json_is_not_written_when_a_sheet_has_errors()
+    {
+        var overrides = Path.Combine(_dir, "mdata-only.yaml");
+        await File.WriteAllTextAsync(overrides, TimetableParserTests.Overrides.Replace(
+            "orar: { sheets: [\"An 1\", \"An 2\", \"An 3\", \"An 1 MDATA\"] }", "orar: { sheets: [\"An 1 MDATA\"] }"));
+        var workbook = Path.Combine(_dir, "four-days.xlsx");
+        using (var fourDays = new TimetableWorkbook())
+        {
+            fourDays.Sheet("An 1 MDATA", firstGridRow: 3, days: ["", "", "", ""]).Activity(0, 8, "C", "Fundamente de orbitare (c)", lastColumn: "D");
+            await File.WriteAllBytesAsync(workbook, fourDays.Bytes());
+        }
+
+        var json = Path.Combine(_dir, "subjects.json");
+        var output = new StringWriter();
+
+        Assert.Equal(1, await ImportTimetableCommand.RunAsync(["--overrides", overrides, "--parse-only", "--subjects-json", json, workbook],
+            output, TextWriter.Null));
+        Assert.False(File.Exists(json));
+        Assert.Contains($"Subjects not written to {json}: a sheet has errors.", output.ToString());
     }
 
     [Fact]

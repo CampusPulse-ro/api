@@ -22,7 +22,8 @@ public sealed record SubjectKey(string Programme, int Year, string Name)
     public override string ToString() => $"{Programme} y{Year} {Name}";
 }
 
-public sealed record ParsedSubject(SubjectKey Key, string? ShortName, SubjectChoice Choice);
+/// <param name="CampusVirtualCourseId">its Campus Virtual course, from the overrides' campusVirtual section.</param>
+public sealed record ParsedSubject(SubjectKey Key, string? ShortName, SubjectChoice Choice, int? CampusVirtualCourseId = null);
 
 public sealed record ParsedSlot(
     SubjectKey Subject,
@@ -72,6 +73,9 @@ public sealed class ParsedTimetable(string source, string fileName)
     public HashSet<GroupKey> Groups { get; } = [];
 
     public Dictionary<SubjectKey, ParsedSubject> Subjects { get; } = [];
+
+    /// <summary>The overrides list Campus Virtual courses, so the import reports the subjects without one.</summary>
+    public bool CampusVirtualListed { get; set; }
 
     public List<ParsedSlot> Slots { get; } = [];
 

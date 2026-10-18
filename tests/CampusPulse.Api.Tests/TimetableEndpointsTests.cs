@@ -15,7 +15,8 @@ using Microsoft.Extensions.DependencyInjection;
 namespace CampusPulse.Api.Tests;
 
 /// <summary>A migrated Postgres with the (invented) test workbook imported once: 2030-31, semester 1, week 1
-/// from Monday 30 Sep 2030, 2 Dec a non-teaching day, 23 Dec - 5 Jan the break.</summary>
+/// from Monday 30 Sep 2030, 2 Dec a non-teaching day, 23 Dec - 5 Jan the break. Two subjects have a Campus
+/// Virtual course (<see cref="TimetableParserTests.CampusVirtualSection"/>).</summary>
 public sealed class ImportedTimetable : IAsyncLifetime
 {
     public PostgresAppFactory Factory { get; } = new();
@@ -28,7 +29,7 @@ public sealed class ImportedTimetable : IAsyncLifetime
             return; // no Postgres here: the tests are skipped
         }
 
-        var overrides = ImportOverrides.Parse(TimetableParserTests.Overrides);
+        var overrides = ImportOverrides.Parse(TimetableParserTests.Overrides + "\n" + TimetableParserTests.CampusVirtualSection);
         using var workbook = TimetableParserTests.Workbook();
         var bytes = workbook.Bytes();
         using var stream = new MemoryStream(bytes);
@@ -191,6 +192,34 @@ public sealed class TimetableEndpointsTests(ImportedTimetable timetable) : IClas
 
         Assert.Equal(HttpStatusCode.NoContent, (await Send(client, HttpMethod.Delete, $"/me/subjects/{choice.Id}", oid)).StatusCode);
         Assert.DoesNotContain((await Get<TimetableResponse>(client, "/me/timetable?from=2030-09-30", oid)).Occurrences, o => o.Subject == "Pedagogia jocului");
+    }
+
+    [PostgresFact]
+    public async Task Every_class_and_subject_links_to_its_Campus_Virtual_course_where_it_has_one()
+    {
+        const string Geometry = "https://cv.upt.ro/course/view.php?id=4101";
+        const string Pedagogy = "https://cv.upt.ro/course/view.php?id=4102";
+        var client = App().CreateClient();
+        var group = await Group(client, "ALFA", 1, "X", "1.2");
+        var oid = await Student(client, group.Id);
+
+        var choice = Assert.Single(await Get<List<ChoiceSubjectResponse>>(client, $"/timetable/groups/{group.Id}/choices", oid));
+        Assert.Equal(Pedagogy, choice.CampusVirtualUrl);
+        var picked = await Send(client, HttpMethod.Put, $"/me/subjects/{choice.Id}", oid, new { offeredSlotId = choice.Offers[0].Id });
+        Assert.Equal(Pedagogy, (await picked.Content.ReadFromJsonAsync<StudentSubjectResponse>(Json))!.CampusVirtualUrl);
+        Assert.Equal(Pedagogy, Assert.Single(await Get<List<StudentSubjectResponse>>(client, "/me/subjects", oid)).CampusVirtualUrl);
+
+        var week1 = await Get<TimetableResponse>(client, "/me/timetable?from=2030-09-30&to=2030-10-06", oid);
+        Assert.Equal(
+            $"Geometria fractalilor {Geometry}; Logica senzorilor virtuali -; Pedagogia jocului {Pedagogy}",
+            string.Join("; ", week1.Occurrences.Where(o => o.Subject is "Geometria fractalilor" or "Logica senzorilor virtuali" or "Pedagogia jocului")
+                .Select(o => $"{o.Subject} {o.CampusVirtualUrl ?? "-"}").Distinct().Order(StringComparer.Ordinal)));
+        Assert.All(week1.Occurrences.Where(o => o.Subject is not ("Geometria fractalilor" or "Pedagogia jocului")), o => Assert.Null(o.CampusVirtualUrl));
+
+        var k210 = await Get<RoomTimetableResponse>(client, "/rooms/K210/timetable?date=2030-09-30", oid);
+        Assert.Equal(Geometry, Assert.Single(k210.Occurrences).CampusVirtualUrl);
+        var q202 = await Get<RoomTimetableResponse>(client, "/rooms/Q202/timetable?date=2030-09-30", oid);
+        Assert.Equal(Pedagogy, Assert.Single(q202.Occurrences).CampusVirtualUrl);
     }
 
     [PostgresFact]

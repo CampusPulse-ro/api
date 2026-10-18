@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.RegularExpressions;
 using CampusPulse.Domain.Timetable;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
@@ -33,6 +34,9 @@ public sealed class ImportOverrides
 
     /// <summary>Room code → what we know about it.</summary>
     public Dictionary<string, RoomOverride> Rooms { get; set; } = [];
+
+    /// <summary>The subjects' Campus Virtual (Moodle) courses, written by scripts/campus-virtual-courses.py.</summary>
+    public CampusVirtualOverrides CampusVirtual { get; set; } = new();
 
     public static ImportOverrides Parse(string yaml)
     {
@@ -109,6 +113,8 @@ public sealed class ImportOverrides
                 throw new FormatException($"overrides: cells.\"{key}\".kind \"{kind}\" isn't course, lab, seminar, project or a sum like lab+project.");
             }
         }
+
+        CampusVirtual.Validate(Programmes);
     }
 
     /// <summary>What's odd about the overrides themselves: sheets that no source lists.</summary>
@@ -159,6 +165,97 @@ public sealed class ImportOverrides
         "grid" => ColumnRole.Grid,
         _ => throw new FormatException($"overrides: sheets.\"{sheet}\".columnRoles: \"{role}\" is not optional, facultative, pickSlot, notes or grid."),
     };
+}
+
+/// <summary>
+/// Campus Virtual (cv.upt.ro, UPT's Moodle): which course each subject has there, so a class can link to it.
+/// scripts/campus-virtual-courses.py writes this section from the catalog (docs/timetable-import.md);
+/// <see cref="Search"/> and <see cref="Codes"/> are its input, which the import doesn't use.
+/// </summary>
+public sealed partial class CampusVirtualOverrides
+{
+    private readonly Dictionary<SubjectKey, CampusVirtualCourse> _bySubject = [];
+
+    /// <summary>The course shortname prefixes the script searches the catalog for, e.g. "S1-L-XY".</summary>
+    public List<string> Search { get; set; } = [];
+
+    /// <summary>Programme code → the codes Moodle shortnames use for it (by default the code without its
+    /// punctuation): a programme whose courses partly sit under a common one lists both.</summary>
+    public Dictionary<string, List<string>> Codes { get; set; } = [];
+
+    /// <summary>Programme code → year → subject name (as the import reads it) → its course.</summary>
+    public Dictionary<string, Dictionary<int, Dictionary<string, CampusVirtualCourse>>> Courses { get; set; } = [];
+
+    /// <summary>The subject's course id, or null when it has none here (or a hand entry says none).</summary>
+    public int? CourseOf(SubjectKey subject) => _bySubject.GetValueOrDefault(subject)?.Id;
+
+    /// <summary>The entries, as the subjects they name.</summary>
+    public IEnumerable<SubjectKey> Subjects => _bySubject.Keys;
+
+    internal void Validate(IReadOnlyDictionary<string, string> programmes)
+    {
+        foreach (var programme in Codes.Keys.Concat(Courses.Keys).Where(p => !programmes.ContainsKey(p)))
+        {
+            throw new FormatException($"overrides: campusVirtual names programme {programme}, which programmes doesn't list.");
+        }
+
+        // The script reads a course's programme and year from the shortname part after the prefix: a stray dash or
+        // space would shift it.
+        if (Search.FirstOrDefault(p => !ShortnamePart().IsMatch(p)) is { } prefix)
+        {
+            throw new FormatException($"overrides: campusVirtual.search \"{prefix}\" isn't a shortname prefix like S1-X-FAC.");
+        }
+
+        if (Codes.SelectMany(c => c.Value).FirstOrDefault(c => !ShortnameCode().IsMatch(c)) is { } code)
+        {
+            throw new FormatException($"overrides: campusVirtual.codes \"{code}\" isn't a programme code of letters and digits.");
+        }
+
+        foreach (var (programme, years) in Courses)
+        {
+            foreach (var (year, subjects) in years)
+            {
+                if (year is < 1 or > 6)
+                {
+                    throw new FormatException($"overrides: campusVirtual.courses.{programme}: year {year} isn't 1-6.");
+                }
+
+                foreach (var (name, course) in subjects)
+                {
+                    var where = $"campusVirtual.courses.{programme}.{year}.\"{name}\"";
+                    if (string.IsNullOrWhiteSpace(name) || course is null || (course.Id is null && !course.Hand) || course.Id is <= 0)
+                    {
+                        throw new FormatException($"overrides: {where} needs a course id above 0 (only a hand: true entry may have none).");
+                    }
+
+                    if (!_bySubject.TryAdd(new SubjectKey(programme, year, name), course))
+                    {
+                        throw new FormatException($"overrides: {where} is listed twice (names are compared ignoring case and diacritics).");
+                    }
+                }
+            }
+        }
+    }
+
+    [GeneratedRegex("^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$")]
+    private static partial Regex ShortnamePart();
+
+    [GeneratedRegex("^[A-Za-z0-9]+$")]
+    private static partial Regex ShortnameCode();
+}
+
+/// <summary>A subject's Campus Virtual course.</summary>
+public sealed class CampusVirtualCourse
+{
+    /// <summary>The Moodle course id: its page is /course/view.php?id=…</summary>
+    public int? Id { get; set; }
+
+    /// <summary>The course's Moodle shortname, for whoever reads the file; the import doesn't use it.</summary>
+    public string? Shortname { get; set; }
+
+    /// <summary>Set by hand rather than by the script, which keeps it as it is. A hand entry without an id says
+    /// the subject has no course.</summary>
+    public bool Hand { get; set; }
 }
 
 public sealed class SourceOverrides
