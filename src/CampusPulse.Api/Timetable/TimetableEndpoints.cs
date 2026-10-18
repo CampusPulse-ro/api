@@ -38,13 +38,16 @@ public sealed record OfferedSlotResponse(
     string? Room,
     IReadOnlyList<int> Weeks);
 
-/// <summary>A subject a student chooses (optional) or picks a time for (pick-slot), with its offers.</summary>
-public sealed record ChoiceSubjectResponse(Guid Id, string Name, string? ShortName, SubjectChoice Choice, IReadOnlyList<OfferedSlotResponse> Offers);
+/// <summary>A subject a student chooses (optional) or picks a time for (pick-slot), with its offers.
+/// <see cref="CampusVirtualUrl"/>: its course page on Campus Virtual, null when it has none we know of.</summary>
+public sealed record ChoiceSubjectResponse(Guid Id, string Name, string? ShortName, string? CampusVirtualUrl, SubjectChoice Choice,
+    IReadOnlyList<OfferedSlotResponse> Offers);
 
 /// <summary>
 /// One class on one date. <see cref="Optional"/>: the subject is optional (in a student's own
 /// timetable only when they chose it). <see cref="OfferedSlotId"/>: it's the student's pick of an
-/// offered slot rather than a grid slot.
+/// offered slot rather than a grid slot. <see cref="CampusVirtualUrl"/>: the subject's course page on Campus
+/// Virtual, null when it has none we know of.
 /// </summary>
 public sealed record OccurrenceResponse(
     DateOnly Date,
@@ -54,6 +57,7 @@ public sealed record OccurrenceResponse(
     Guid SubjectId,
     string Subject,
     string? ShortName,
+    string? CampusVirtualUrl,
     IReadOnlyList<ActivityKind> Kinds,
     string? Room,
     string? Teacher,
@@ -83,19 +87,23 @@ public sealed record StudentSettingsResponse(StudyGroupResponse? StudyGroup, boo
 public sealed record UpdateStudentSettingsRequest(Guid? StudyGroupId);
 
 /// <summary>A subject the student chose. <see cref="NoLongerOffered"/>: the latest import of its workbook
-/// doesn't have it any more.</summary>
-public sealed record StudentSubjectResponse(Guid SubjectId, string Name, string? ShortName, SubjectChoice Choice, Guid? OfferedSlotId,
-    bool NoLongerOffered);
+/// doesn't have it any more. <see cref="CampusVirtualUrl"/>: its course page on Campus Virtual, null when it has
+/// none we know of.</summary>
+public sealed record StudentSubjectResponse(Guid SubjectId, string Name, string? ShortName, string? CampusVirtualUrl, SubjectChoice Choice,
+    Guid? OfferedSlotId, bool NoLongerOffered);
 
 /// <summary>Body of <c>PUT /me/subjects/{subjectId}</c>: the offered slot picked, or null for none yet.</summary>
 public sealed record PickSubjectRequest(Guid? OfferedSlotId);
 
 public sealed record RoomResponse(string Code, string? Building, string? Floor, int? Capacity);
 
+/// <summary>A class or offered slot in a room. <see cref="CampusVirtualUrl"/>: the subject's course page on
+/// Campus Virtual, null when it has none we know of.</summary>
 public sealed record RoomOccurrenceResponse(
     TimeOnly StartsAt,
     TimeOnly EndsAt,
     string Subject,
+    string? CampusVirtualUrl,
     IReadOnlyList<ActivityKind> Kinds,
     IReadOnlyList<string> Groups,
     bool Offered);
@@ -262,7 +270,7 @@ public static class TimetableEndpoints
         var offers = await db.OfferedSlots.Where(o => subjectIds.Contains(o.SubjectId)).ToListAsync(cancellationToken);
         var rooms = await RoomCodesAsync(db, offers.Select(o => o.RoomId), cancellationToken);
         IReadOnlyList<ChoiceSubjectResponse> body = [.. subjects.OrderBy(s => s.Name, StringComparer.InvariantCulture).Select(s => new ChoiceSubjectResponse(
-            s.Id, s.Name, s.ShortName, s.Choice,
+            s.Id, s.Name, s.ShortName, CampusVirtual.CourseUrl(s.CampusVirtualCourseId), s.Choice,
             [.. offers.Where(o => o.SubjectId == s.Id).OrderBy(o => o.Weekday).ThenBy(o => o.StartsAt)
                 .Select(o => new OfferedSlotResponse(o.Id, o.Kinds.List(), o.Weekday, o.StartsAt, o.EndsAt, Code(rooms, o.RoomId), o.Weeks.Weeks()))]))];
         return TypedResults.Ok(body);
@@ -352,8 +360,8 @@ public static class TimetableEndpoints
         IReadOnlyList<StudentSubjectResponse> body = [.. picks.Where(p => subjects.ContainsKey(p.SubjectId))
             .Select(p => (Pick: p, Subject: subjects[p.SubjectId]))
             .OrderBy(x => x.Subject.Name, StringComparer.InvariantCulture)
-            .Select(x => new StudentSubjectResponse(x.Subject.Id, x.Subject.Name, x.Subject.ShortName, x.Subject.Choice, x.Pick.OfferedSlotId,
-                x.Subject.RetiredAt is not null))];
+            .Select(x => new StudentSubjectResponse(x.Subject.Id, x.Subject.Name, x.Subject.ShortName,
+                CampusVirtual.CourseUrl(x.Subject.CampusVirtualCourseId), x.Subject.Choice, x.Pick.OfferedSlotId, x.Subject.RetiredAt is not null))];
         return TypedResults.Ok(body);
     }
 
@@ -408,8 +416,8 @@ public static class TimetableEndpoints
 
                 pick.Pick(request.OfferedSlotId, time.GetUtcNow());
                 await db.SaveChangesAsync(cancellationToken);
-                return TypedResults.Ok(new StudentSubjectResponse(subject.Id, subject.Name, subject.ShortName, subject.Choice, pick.OfferedSlotId,
-                    NoLongerOffered: false));
+                return TypedResults.Ok(new StudentSubjectResponse(subject.Id, subject.Name, subject.ShortName,
+                    CampusVirtual.CourseUrl(subject.CampusVirtualCourseId), subject.Choice, pick.OfferedSlotId, NoLongerOffered: false));
             }
             catch (DbUpdateException e) when (attempt == 1 && IsRace(e))
             {
@@ -506,11 +514,11 @@ public static class TimetableEndpoints
             var programmeIds = groups.Values.Select(g => g.ProgrammeId).Distinct().ToList();
             var programmes = await db.Programmes.Where(p => programmeIds.Contains(p.Id)).ToDictionaryAsync(p => p.Id, cancellationToken);
             occurrences.AddRange(slots.Where(s => s.Weeks.Contains(weekNumber)).Select(s => new RoomOccurrenceResponse(s.StartsAt, s.EndsAt,
-                subjects[s.SubjectId].Name, s.Kinds.List(),
+                subjects[s.SubjectId].Name, CampusVirtual.CourseUrl(subjects[s.SubjectId].CampusVirtualCourseId), s.Kinds.List(),
                 [.. s.Groups.Select(g => groups[g.StudyGroupId]).Select(g => $"{programmes[g.ProgrammeId].Code} {g.Year} {g.Label}").Order(StringComparer.Ordinal)],
                 Offered: false)));
             occurrences.AddRange(offers.Where(o => o.Weeks.Contains(weekNumber)).Select(o => new RoomOccurrenceResponse(o.StartsAt, o.EndsAt,
-                subjects[o.SubjectId].Name, o.Kinds.List(), [], Offered: true)));
+                subjects[o.SubjectId].Name, CampusVirtual.CourseUrl(subjects[o.SubjectId].CampusVirtualCourseId), o.Kinds.List(), [], Offered: true)));
         }
 
         return TypedResults.Ok(new RoomTimetableResponse(day, week, RoomResponseOf(room),
@@ -548,7 +556,7 @@ public static class TimetableEndpoints
                 if (OnDate(semesters[subject.SemesterId], slot.Weeks, date) is { } week)
                 {
                     occurrences.Add(new OccurrenceResponse(date, week, slot.StartsAt, slot.EndsAt, subject.Id, subject.Name, subject.ShortName,
-                        slot.Kinds.List(), Code(rooms, slot.RoomId), slot.Teacher, slot.Note, subject.Choice == SubjectChoice.Optional,
+                        CampusVirtual.CourseUrl(subject.CampusVirtualCourseId), slot.Kinds.List(), Code(rooms, slot.RoomId), slot.Teacher, slot.Note, subject.Choice == SubjectChoice.Optional,
                         slot.Id, null));
                 }
             }
@@ -559,7 +567,7 @@ public static class TimetableEndpoints
                 if (OnDate(semesters[subject.SemesterId], offer.Weeks, date) is { } week)
                 {
                     occurrences.Add(new OccurrenceResponse(date, week, offer.StartsAt, offer.EndsAt, subject.Id, subject.Name, subject.ShortName,
-                        offer.Kinds.List(), Code(rooms, offer.RoomId), null, null, subject.Choice == SubjectChoice.Optional, null, offer.Id));
+                        CampusVirtual.CourseUrl(subject.CampusVirtualCourseId), offer.Kinds.List(), Code(rooms, offer.RoomId), null, null, subject.Choice == SubjectChoice.Optional, null, offer.Id));
                 }
             }
         }

@@ -4,12 +4,13 @@ using CampusPulse.Infrastructure;
 namespace CampusPulse.Api.Timetable.Import;
 
 /// <summary>
-/// <c>CampusPulse.Api import-timetable --overrides FILE [--dry-run | --parse-only] [--force] WORKBOOK.xlsx…</c>:
+/// <c>CampusPulse.Api import-timetable --overrides FILE [--dry-run | --parse-only] [--force] [--subjects-json FILE] WORKBOOK.xlsx…</c>:
 /// the one-off timetable import (CampusPulse-ro/api#5), run by hand. Never by the app or a deploy.
 /// <list type="bullet">
 /// <item><c>--parse-only</c> reads the files and prints what it found and every warning; no database.</item>
 /// <item><c>--dry-run</c> also compares with the database and prints the changes, writing nothing.</item>
 /// <item>Otherwise the same printout, then everything is written in one transaction.</item>
+/// <item><c>--subjects-json FILE</c> also writes the subjects read, for scripts/campus-virtual-courses.py.</item>
 /// </list>
 /// Each workbook is recognised by its sheets (the overrides' sources), never by its file name. The database
 /// comes from <c>ConnectionStrings__Postgres</c>, as for the app. On the Pi:
@@ -21,11 +22,13 @@ public static class ImportTimetableCommand
     public const string Name = "import-timetable";
 
     private const string Usage =
-        "usage: CampusPulse.Api import-timetable --overrides FILE [--dry-run | --parse-only] [--force] WORKBOOK.xlsx [WORKBOOK.xlsx …]";
+        "usage: CampusPulse.Api import-timetable --overrides FILE [--dry-run | --parse-only] [--force] [--subjects-json FILE] "
+        + "WORKBOOK.xlsx [WORKBOOK.xlsx …]";
 
     public static async Task<int> RunAsync(string[] args, TextWriter output, TextWriter error)
     {
         string? overridesPath = null;
+        string? subjectsJsonPath = null;
         var dryRun = false;
         var parseOnly = false;
         var force = false;
@@ -36,6 +39,9 @@ public static class ImportTimetableCommand
             {
                 case "--overrides" when i + 1 < args.Length:
                     overridesPath = args[++i];
+                    break;
+                case "--subjects-json" when i + 1 < args.Length:
+                    subjectsJsonPath = args[++i];
                     break;
                 case "--dry-run":
                     dryRun = true;
@@ -92,6 +98,12 @@ public static class ImportTimetableCommand
             {
                 error.WriteLine($"import-timetable failed: {string.Join(" and ", twice.Select(f => f.FileName))} are both source {twice.Key}");
                 return ImportExit.Failed;
+            }
+
+            if (subjectsJsonPath is not null)
+            {
+                await File.WriteAllTextAsync(subjectsJsonPath, CampusVirtualExport.Json(overrides, files));
+                output.WriteLine($"Subjects written to {subjectsJsonPath}.");
             }
 
             if (parseOnly)

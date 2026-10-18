@@ -69,7 +69,29 @@ public sealed partial class SheetParser(ImportOverrides overrides)
             result.Warnings.Add($"overrides: cells.\"{key}\" matches no cell that has text");
         }
 
+        LinkCampusVirtual(result);
         return result;
+    }
+
+    /// <summary>Gives each subject its Campus Virtual course (the overrides' campusVirtual.courses). An entry for
+    /// a programme's year this workbook has, naming none of its subjects, is warned: the name changed.</summary>
+    private void LinkCampusVirtual(ParsedTimetable result)
+    {
+        var campusVirtual = overrides.CampusVirtual;
+        result.CampusVirtualListed = campusVirtual.Subjects.Any();
+        foreach (var subject in result.Subjects.Values.ToList())
+        {
+            if (campusVirtual.CourseOf(subject.Key) is { } id)
+            {
+                result.Subjects[subject.Key] = subject with { CampusVirtualCourseId = id };
+            }
+        }
+
+        var years = result.Subjects.Keys.Select(k => (k.Programme, k.Year)).ToHashSet();
+        foreach (var entry in campusVirtual.Subjects.Where(e => years.Contains((e.Programme, e.Year)) && !result.Subjects.ContainsKey(e)))
+        {
+            result.Warnings.Add($"overrides: campusVirtual.courses.{entry.Programme}.{entry.Year}.\"{entry.Name}\" matches no subject");
+        }
     }
 
     private sealed class SheetReader(SheetParser parser, SheetGrid sheet, SheetOverrides config, ParsedTimetable result)

@@ -275,7 +275,7 @@ public sealed class TimetableImporter(CampusPulseDbContext db, TimeProvider time
                 subjects.Add(subject);
             }
 
-            subject.Update(parsedSubject.ShortName, parsedSubject.Choice, file.Source);
+            subject.Update(parsedSubject.ShortName, parsedSubject.Choice, file.Source, parsedSubject.CampusVirtualCourseId);
             subjectIds[key] = subject.Id;
         }
 
@@ -349,7 +349,10 @@ public sealed class TimetableImporter(CampusPulseDbContext db, TimeProvider time
 
         var summary = $"{parsed.Groups.Count} groups, {parsed.Subjects.Count} subjects, {parsed.Slots.Count} slots, "
             + $"{parsed.Offers.Count} offered slots, {parsed.Notes.Count} notes, {parsed.Warnings.Count} warnings; "
-            + $"{retiredGroups.Count} groups and {retiredSubjects.Count} subjects no longer offered";
+            + $"{retiredGroups.Count} groups and {retiredSubjects.Count} subjects no longer offered"
+            + (parsed.CampusVirtualListed
+                ? $"; {parsed.Subjects.Values.Count(s => s.CampusVirtualCourseId is null)} subjects without a Campus Virtual course"
+                : "");
         db.TimetableImportRuns.Add(new TimetableImportRun(semester.Id, file.Source, file.FileName, parsed.Sheets, file.Sha256, overridesSha256,
             SheetParser.Version, summary, parsed.Warnings, now));
         output.WriteLine($"{file.FileName} (source {file.Source}): {summary}.");
@@ -368,7 +371,7 @@ public sealed class TimetableImporter(CampusPulseDbContext db, TimeProvider time
             parsed.Slots.Select(SlotLine).ToList(),
             parsed.Offers.Select(OfferLine).ToList(),
             parsed.Groups.Select(g => g.ToString()).ToList(),
-            parsed.Subjects.Values.Select(s => $"{s.Key} [{s.Choice}]").ToList(),
+            parsed.Subjects.Values.Select(s => SubjectLine(s.Key, s.Choice, s.CampusVirtualCourseId)).ToList(),
             parsed.Notes.Select(n => $"{n.Programme} y{n.Year}: {n.Text}").ToList());
 
         output.WriteLine($"== {file.FileName} (source {file.Source}, sha256 {file.Sha256})");
@@ -377,6 +380,16 @@ public sealed class TimetableImporter(CampusPulseDbContext db, TimeProvider time
         PrintSection(output, "slots", before.Slots, after.Slots);
         PrintSection(output, "offered slots", before.Offers, after.Offers);
         PrintSection(output, "notes", before.Notes, after.Notes);
+        if (parsed.CampusVirtualListed)
+        {
+            var without = parsed.Subjects.Values.Where(s => s.CampusVirtualCourseId is null).Select(s => s.Key.ToString()).Order(StringComparer.Ordinal).ToList();
+            output.WriteLine($"-- Campus Virtual: {parsed.Subjects.Count - without.Count} of {parsed.Subjects.Count} subjects have a course, {without.Count} have none");
+            foreach (var subject in without)
+            {
+                output.WriteLine($"   ? {subject}");
+            }
+        }
+
         output.WriteLine($"-- {parsed.Warnings.Count} warning(s)");
         foreach (var warning in parsed.Warnings)
         {
@@ -456,9 +469,12 @@ public sealed class TimetableImporter(CampusPulseDbContext db, TimeProvider time
                 o.RoomId is { } room ? rooms[room] : null, o.SourceCell, o.RawText))).ToList(),
             groups.Values.Where(g => g.Source == source && g.RetiredAt is null).Select(g => Key(g).ToString()).ToList(),
             subjects.Values.Where(s => s.Source == source && s.RetiredAt is null)
-                .Select(s => $"{SubjectOf(s.Id)} [{s.Choice}]").ToList(),
+                .Select(s => SubjectLine(SubjectOf(s.Id), s.Choice, s.CampusVirtualCourseId)).ToList(),
             notes.Select(n => $"{programmes[n.ProgrammeId]} y{n.Year}: {n.Text}").ToList());
     }
+
+    private static string SubjectLine(SubjectKey subject, SubjectChoice choice, int? campusVirtualCourseId) =>
+        $"{subject} [{choice}]{(campusVirtualCourseId is { } id ? $" cv:{id}" : "")}";
 
     private static string SlotLine(ParsedSlot slot) =>
         $"{string.Join(" ", slot.Groups.Select(g => g.ToString()).Order(StringComparer.Ordinal))} | {slot.Weekday} "

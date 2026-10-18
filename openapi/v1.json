@@ -943,6 +943,7 @@
           "id",
           "name",
           "shortName",
+          "campusVirtualUrl",
           "choice",
           "offers"
         ],
@@ -956,6 +957,12 @@
             "type": "string"
           },
           "shortName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "campusVirtualUrl": {
             "type": [
               "null",
               "string"
@@ -1065,6 +1072,7 @@
           "subjectId",
           "subject",
           "shortName",
+          "campusVirtualUrl",
           "kinds",
           "room",
           "teacher",
@@ -1099,6 +1107,12 @@
             "type": "string"
           },
           "shortName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "campusVirtualUrl": {
             "type": [
               "null",
               "string"
@@ -1313,6 +1327,7 @@
           "startsAt",
           "endsAt",
           "subject",
+          "campusVirtualUrl",
           "kinds",
           "groups",
           "offered"
@@ -1329,6 +1344,12 @@
           },
           "subject": {
             "type": "string"
+          },
+          "campusVirtualUrl": {
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "kinds": {
             "type": "array",
@@ -1490,6 +1511,7 @@
           "subjectId",
           "name",
           "shortName",
+          "campusVirtualUrl",
           "choice",
           "offeredSlotId",
           "noLongerOffered"
@@ -1504,6 +1526,12 @@
             "type": "string"
           },
           "shortName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "campusVirtualUrl": {
             "type": [
               "null",
               "string"

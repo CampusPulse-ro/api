@@ -198,11 +198,20 @@ public sealed class Subject
     /// <summary>When an import of its workbook no longer had it; null while it's offered.</summary>
     public DateTimeOffset? RetiredAt { get; private set; }
 
+    /// <summary>Its course on Campus Virtual (UPT's Moodle), by the course id; null when it has none we know of.</summary>
+    public int? CampusVirtualCourseId { get; private set; }
+
     /// <summary>What the latest import says about it; offered again if it was retired.</summary>
-    public void Update(string? shortName, SubjectChoice choice, string source)
+    public void Update(string? shortName, SubjectChoice choice, string source, int? campusVirtualCourseId)
     {
+        if (campusVirtualCourseId is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(campusVirtualCourseId), "A Campus Virtual course id is positive.");
+        }
+
         ShortName = shortName is null ? null : TextLimits.Clamp(shortName, ShortNameMaxLength);
         Choice = choice;
+        CampusVirtualCourseId = campusVirtualCourseId;
         RetiredAt = null;
         Source = TextLimits.Clamp(source, TextLimits.SourceMaxLength);
     }
