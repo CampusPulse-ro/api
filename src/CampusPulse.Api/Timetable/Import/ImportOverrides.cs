@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.RegularExpressions;
 using CampusPulse.Domain.Timetable;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
@@ -171,7 +172,7 @@ public sealed class ImportOverrides
 /// scripts/campus-virtual-courses.py writes this section from the catalog (docs/timetable-import.md);
 /// <see cref="Search"/> and <see cref="Codes"/> are its input, which the import doesn't use.
 /// </summary>
-public sealed class CampusVirtualOverrides
+public sealed partial class CampusVirtualOverrides
 {
     private readonly Dictionary<SubjectKey, CampusVirtualCourse> _bySubject = [];
 
@@ -196,6 +197,18 @@ public sealed class CampusVirtualOverrides
         foreach (var programme in Codes.Keys.Concat(Courses.Keys).Where(p => !programmes.ContainsKey(p)))
         {
             throw new FormatException($"overrides: campusVirtual names programme {programme}, which programmes doesn't list.");
+        }
+
+        // The script reads a course's programme and year from the shortname part after the prefix: a stray dash or
+        // space would shift it.
+        if (Search.FirstOrDefault(p => !ShortnamePart().IsMatch(p)) is { } prefix)
+        {
+            throw new FormatException($"overrides: campusVirtual.search \"{prefix}\" isn't a shortname prefix like S1-X-FAC.");
+        }
+
+        if (Codes.SelectMany(c => c.Value).FirstOrDefault(c => !ShortnameCode().IsMatch(c)) is { } code)
+        {
+            throw new FormatException($"overrides: campusVirtual.codes \"{code}\" isn't a programme code of letters and digits.");
         }
 
         foreach (var (programme, years) in Courses)
@@ -223,6 +236,12 @@ public sealed class CampusVirtualOverrides
             }
         }
     }
+
+    [GeneratedRegex("^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$")]
+    private static partial Regex ShortnamePart();
+
+    [GeneratedRegex("^[A-Za-z0-9]+$")]
+    private static partial Regex ShortnameCode();
 }
 
 /// <summary>A subject's Campus Virtual course.</summary>

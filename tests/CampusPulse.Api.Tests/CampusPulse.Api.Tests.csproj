@@ -23,4 +23,10 @@
     <ProjectReference Include="..\..\src\CampusPulse.Api\CampusPulse.Api.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The campusVirtual section scripts/campus-virtual-courses.py writes; its own tests check that it does. -->
+    <None Include="..\..\scripts\tests\fixtures\campus-virtual-section.yaml" Link="Fixtures\campus-virtual-section.yaml"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

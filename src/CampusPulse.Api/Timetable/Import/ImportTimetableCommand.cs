@@ -10,7 +10,8 @@ namespace CampusPulse.Api.Timetable.Import;
 /// <item><c>--parse-only</c> reads the files and prints what it found and every warning; no database.</item>
 /// <item><c>--dry-run</c> also compares with the database and prints the changes, writing nothing.</item>
 /// <item>Otherwise the same printout, then everything is written in one transaction.</item>
-/// <item><c>--subjects-json FILE</c> also writes the subjects read, for scripts/campus-virtual-courses.py.</item>
+/// <item><c>--subjects-json FILE</c> also writes the subjects read, for scripts/campus-virtual-courses.py (not when a
+/// sheet has errors).</item>
 /// </list>
 /// Each workbook is recognised by its sheets (the overrides' sources), never by its file name. The database
 /// comes from <c>ConnectionStrings__Postgres</c>, as for the app. On the Pi:
@@ -100,9 +101,13 @@ public static class ImportTimetableCommand
                 return ImportExit.Failed;
             }
 
-            if (subjectsJsonPath is not null)
+            if (subjectsJsonPath is not null && files.Any(f => f.Parsed.Errors.Count > 0))
             {
-                await File.WriteAllTextAsync(subjectsJsonPath, CampusVirtualExport.Json(overrides, files));
+                output.WriteLine($"Subjects not written to {subjectsJsonPath}: a sheet has errors.");
+            }
+            else if (subjectsJsonPath is not null)
+            {
+                await File.WriteAllTextAsync(subjectsJsonPath, CampusVirtualExport.Json(overrides, Sha256(overridesBytes), files));
                 output.WriteLine($"Subjects written to {subjectsJsonPath}.");
             }
 

@@ -146,6 +146,25 @@ public sealed class TimetableImportTests(PostgresAppFactory factory) : IClassFix
         Assert.Equal(4201, await CourseOf("2042-2043", "Geometria fractalilor"));
     }
 
+    [PostgresFact]
+    public async Task A_removed_entry_or_a_hand_entry_without_an_id_clears_the_course()
+    {
+        using var workbook = TimetableParserTests.Workbook();
+        var yaml = OverridesFor("2043-2044") + "\n" + TimetableParserTests.CampusVirtualSection;
+        Assert.Equal(ImportExit.Done, (await Import(yaml, [(workbook, "orar.xlsx")])).Exit);
+        Assert.Equal((4101, 4102), (await CourseOf("2043-2044", "Geometria fractalilor"), await CourseOf("2043-2044", "Pedagogia jocului")));
+
+        const string Geometry = "        \"GEOMETRIA fractalilor\": { id: 4101, shortname: \"S1-X-FAC-ALFA1-GF\" }\n";
+        const string Pedagogy = "\"Pedagogia jocului\": { id: 4102, shortname: \"S1-X-FAC-PJ\" }";
+        Assert.Contains(Geometry, yaml);
+        Assert.Contains(Pedagogy, yaml);
+        var changed = yaml.Replace(Geometry, "").Replace(Pedagogy, "\"Pedagogia jocului\": { hand: true }");
+
+        Assert.Equal(ImportExit.Done, (await Import(changed, [(workbook, "orar.xlsx")], overridesSha: "overrides-2")).Exit);
+        Assert.Null(await CourseOf("2043-2044", "Geometria fractalilor"));
+        Assert.Null(await CourseOf("2043-2044", "Pedagogia jocului"));
+    }
+
     private async Task<int?> CourseOf(string academicYear, string subject)
     {
         await using var db = factory.CreateDbContext();
