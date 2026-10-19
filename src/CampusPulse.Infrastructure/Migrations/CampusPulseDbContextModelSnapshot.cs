@@ -103,11 +103,16 @@ namespace CampusPulse.Infrastructure.Migrations
                         .HasColumnType("date")
                         .HasColumnName("date");
 
-                    b.Property<string>("Reason")
+                    b.Property<string>("ReasonEn")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("reason_en");
+
+                    b.Property<string>("ReasonRo")
                         .IsRequired()
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)")
-                        .HasColumnName("reason");
+                        .HasColumnName("reason_ro");
 
                     b.HasKey("SemesterId", "Date")
                         .HasName("pk_non_teaching_days");
@@ -261,6 +266,36 @@ namespace CampusPulse.Infrastructure.Migrations
                         .HasDatabaseName("ix_semesters_academic_year_number");
 
                     b.ToTable("semesters", (string)null);
+                });
+
+            modelBuilder.Entity("CampusPulse.Domain.Timetable.SemesterBreak", b =>
+                {
+                    b.Property<Guid>("SemesterId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("semester_id");
+
+                    b.Property<DateOnly>("From")
+                        .HasColumnType("date")
+                        .HasColumnName("from");
+
+                    b.Property<string>("NameEn")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("name_en");
+
+                    b.Property<string>("NameRo")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("name_ro");
+
+                    b.Property<DateOnly>("To")
+                        .HasColumnType("date")
+                        .HasColumnName("to");
+
+                    b.HasKey("SemesterId", "From")
+                        .HasName("pk_semester_breaks");
+
+                    b.ToTable("semester_breaks", (string)null);
                 });
 
             modelBuilder.Entity("CampusPulse.Domain.Timetable.StudentSettings", b =>
@@ -773,6 +808,16 @@ namespace CampusPulse.Infrastructure.Migrations
                         .HasConstraintName("fk_offered_slots_subjects_subject_id");
                 });
 
+            modelBuilder.Entity("CampusPulse.Domain.Timetable.SemesterBreak", b =>
+                {
+                    b.HasOne("CampusPulse.Domain.Timetable.Semester", null)
+                        .WithMany("Breaks")
+                        .HasForeignKey("SemesterId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_semester_breaks_semesters_semester_id");
+                });
+
             modelBuilder.Entity("CampusPulse.Domain.Timetable.StudentSettings", b =>
                 {
                     b.HasOne("CampusPulse.Domain.Timetable.StudyGroup", null)
@@ -925,6 +970,8 @@ namespace CampusPulse.Infrastructure.Migrations
 
             modelBuilder.Entity("CampusPulse.Domain.Timetable.Semester", b =>
                 {
+                    b.Navigation("Breaks");
+
                     b.Navigation("NonTeachingDays");
 
                     b.Navigation("Weeks");

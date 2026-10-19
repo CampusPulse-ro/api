@@ -107,8 +107,13 @@ public sealed class TimetableImportTests(PostgresAppFactory factory) : IClassFix
 
         await using (var db = factory.CreateDbContext())
         {
-            var semester = await db.Semesters.Include(s => s.Weeks).Include(s => s.NonTeachingDays).SingleAsync(s => s.Id == counts.Semester);
+            var semester = await db.Semesters.Include(s => s.Weeks).Include(s => s.NonTeachingDays).Include(s => s.Breaks)
+                .SingleAsync(s => s.Id == counts.Semester);
             Assert.Equal((14, new DateOnly(2031, 1, 6)), (semester.WeekCount, semester.Weeks.Single(w => w.Number == 13).StartsOn));
+            Assert.Equal(new CalendarName("Zi libera", "Day off"), Assert.Single(semester.NonTeachingDays).Reason);
+            var winter = Assert.Single(semester.Breaks);
+            Assert.Equal((new DateOnly(2030, 12, 23), new DateOnly(2031, 1, 5), new CalendarName("Vacanta de iarna", "Winter break")),
+                (winter.From, winter.To, winter.Name));
             var run = await db.TimetableImportRuns.SingleAsync(r => r.SemesterId == counts.Semester);
             Assert.Equal(("orar", "orar.xlsx", SheetParser.Version), (run.Source, run.FileName, run.ParserVersion));
             Assert.Equal(["An 1", "An 2", "An 3", "An 1 MDATA"], run.Sheets);

@@ -166,9 +166,10 @@ public sealed class TimetableImporter(CampusPulseDbContext db, TimeProvider time
             // Replaced, not merged: the old rows go first (same keys); the semester was loaded without them.
             await db.Set<TeachingWeek>().Where(w => w.SemesterId == semester.Id).ExecuteDeleteAsync(cancellationToken);
             await db.Set<NonTeachingDay>().Where(d => d.SemesterId == semester.Id).ExecuteDeleteAsync(cancellationToken);
+            await db.Set<SemesterBreak>().Where(b => b.SemesterId == semester.Id).ExecuteDeleteAsync(cancellationToken);
         }
 
-        semester.SetCalendar(overrides.Calendar.WeekStarts(), overrides.Calendar.Days());
+        semester.SetCalendar(overrides.Calendar.WeekStarts(), overrides.Calendar.Days(), overrides.Calendar.BreakDates());
         return semester;
     }
 

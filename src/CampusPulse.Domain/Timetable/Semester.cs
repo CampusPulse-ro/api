@@ -1,8 +1,22 @@
 namespace CampusPulse.Domain.Timetable;
 
+/// <summary>A calendar name in Romanian and, when known, English ("Ziua Națională a României" /
+/// "Romania's National Day"): the clients show the one of their UI language.</summary>
+public sealed record CalendarName(string Ro, string? En)
+{
+    public const int MaxLength = 200;
+
+    public string Ro { get; } = string.IsNullOrWhiteSpace(Ro) ? throw new ArgumentException("A Romanian name is required.", nameof(Ro))
+        : Clamp(Ro)!;
+
+    public string? En { get; } = string.IsNullOrWhiteSpace(En) ? null : Clamp(En);
+
+    private static string? Clamp(string? text) => text is { Length: > MaxLength } ? text[..MaxLength] : text?.Trim();
+}
+
 /// <summary>
-/// A semester of one academic year ("2026-2027", semester 1): its teaching weeks with their dates and
-/// the days without classes inside them. Everything else in the timetable belongs to one semester.
+/// A semester of one academic year ("2026-2027", semester 1): its teaching weeks with their dates, the
+/// days without classes inside them, and its breaks. Everything else in the timetable belongs to one semester.
 /// </summary>
 public sealed class Semester
 {
@@ -10,6 +24,7 @@ public sealed class Semester
 
     private readonly List<TeachingWeek> _weeks = [];
     private readonly List<NonTeachingDay> _nonTeachingDays = [];
+    private readonly List<SemesterBreak> _breaks = [];
 
     private Semester()
     {
@@ -42,10 +57,14 @@ public sealed class Semester
 
     public IReadOnlyList<NonTeachingDay> NonTeachingDays => _nonTeachingDays;
 
+    /// <summary>The breaks (holidays between teaching weeks), with their dates and names.</summary>
+    public IReadOnlyList<SemesterBreak> Breaks => _breaks;
+
     public int WeekCount => _weeks.Count;
 
     /// <summary>Replaces the calendar: week <c>n</c> starts on <c>weekStarts[n - 1]</c> (a Monday).</summary>
-    public void SetCalendar(IReadOnlyList<DateOnly> weekStarts, IEnumerable<(DateOnly Date, string Reason)> nonTeachingDays)
+    public void SetCalendar(IReadOnlyList<DateOnly> weekStarts, IEnumerable<(DateOnly Date, CalendarName Reason)> nonTeachingDays,
+        IEnumerable<(DateOnly From, DateOnly To, CalendarName? Name)> breaks)
     {
         if (weekStarts.Count is 0 or > WeekSet.MaxWeeks)
         {
@@ -64,6 +83,13 @@ public sealed class Semester
         _weeks.AddRange(weekStarts.Select((start, i) => new TeachingWeek(Id, i + 1, start)));
         _nonTeachingDays.Clear();
         _nonTeachingDays.AddRange(nonTeachingDays.DistinctBy(d => d.Date).Select(d => new NonTeachingDay(Id, d.Date, d.Reason)));
+        _breaks.Clear();
+        foreach (var (from, to, name) in breaks.DistinctBy(b => b.From))
+        {
+            _breaks.Add(to < from
+                ? throw new ArgumentException($"The break from {from:yyyy-MM-dd} ends before it starts.", nameof(breaks))
+                : new SemesterBreak(Id, from, to, name));
+        }
     }
 
     public DateOnly FirstDay => _weeks[0].StartsOn;
@@ -111,25 +137,59 @@ public sealed class TeachingWeek
     public DateOnly StartsOn { get; private set; }
 }
 
-/// <summary>A day inside a teaching week without classes (a public holiday).</summary>
+/// <summary>A day inside a teaching week without classes (a public holiday), and why, in Romanian and English.</summary>
 public sealed class NonTeachingDay
 {
-    public const int ReasonMaxLength = 200;
-
     private NonTeachingDay()
     {
     }
 
-    internal NonTeachingDay(Guid semesterId, DateOnly date, string reason)
+    internal NonTeachingDay(Guid semesterId, DateOnly date, CalendarName reason)
     {
         SemesterId = semesterId;
         Date = date;
-        Reason = reason.Length > ReasonMaxLength ? reason[..ReasonMaxLength] : reason;
+        ReasonRo = reason.Ro;
+        ReasonEn = reason.En;
     }
 
     public Guid SemesterId { get; private set; }
 
     public DateOnly Date { get; private set; }
 
-    public string Reason { get; private set; } = "";
+    public string ReasonRo { get; private set; } = "";
+
+    /// <summary>Null when the overrides give only the Romanian reason.</summary>
+    public string? ReasonEn { get; private set; }
+
+    public CalendarName Reason => new(ReasonRo, ReasonEn);
+}
+
+/// <summary>A break from <see cref="From"/> to <see cref="To"/> (dates included), maybe named ("Vacanța de iarnă").</summary>
+public sealed class SemesterBreak
+{
+    private SemesterBreak()
+    {
+    }
+
+    internal SemesterBreak(Guid semesterId, DateOnly from, DateOnly to, CalendarName? name)
+    {
+        SemesterId = semesterId;
+        From = from;
+        To = to;
+        NameRo = name?.Ro;
+        NameEn = name?.En;
+    }
+
+    public Guid SemesterId { get; private set; }
+
+    public DateOnly From { get; private set; }
+
+    public DateOnly To { get; private set; }
+
+    public string? NameRo { get; private set; }
+
+    public string? NameEn { get; private set; }
+
+    /// <summary>Null for a break without a name.</summary>
+    public CalendarName? Name => NameRo is null ? null : new(NameRo, NameEn);
 }

@@ -938,6 +938,49 @@
           "facultative"
         ]
       },
+      "BreakResponse": {
+        "required": [
+          "from",
+          "to",
+          "name"
+        ],
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "format": "date"
+          },
+          "to": {
+            "type": "string",
+            "format": "date"
+          },
+          "name": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CalendarNameResponse"
+              }
+            ]
+          }
+        }
+      },
+      "CalendarNameResponse": {
+        "required": [
+          "ro",
+          "en"
+        ],
+        "type": "object",
+        "properties": {
+          "ro": {
+            "type": "string"
+          },
+          "en": {
+            "type": "string"
+          }
+        }
+      },
       "ChoiceSubjectResponse": {
         "required": [
           "id",
@@ -1059,7 +1102,7 @@
             "format": "date"
           },
           "reason": {
-            "type": "string"
+            "$ref": "#/components/schemas/CalendarNameResponse"
           }
         }
       },
@@ -1439,6 +1482,7 @@
           "number",
           "weeks",
           "nonTeachingDays",
+          "breaks",
           "today",
           "todayWeek"
         ],
@@ -1465,6 +1509,12 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/NonTeachingDayResponse"
+            }
+          },
+          "breaks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BreakResponse"
             }
           },
           "today": {

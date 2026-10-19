@@ -107,6 +107,7 @@ public sealed class CampusPulseDbContext(DbContextOptions<CampusPulseDbContext> 
             semester.HasIndex(s => new { s.AcademicYear, s.Number }).IsUnique();
             semester.HasMany(s => s.Weeks).WithOne().HasForeignKey(w => w.SemesterId).OnDelete(DeleteBehavior.Cascade);
             semester.HasMany(s => s.NonTeachingDays).WithOne().HasForeignKey(d => d.SemesterId).OnDelete(DeleteBehavior.Cascade);
+            semester.HasMany(s => s.Breaks).WithOne().HasForeignKey(b => b.SemesterId).OnDelete(DeleteBehavior.Cascade);
             semester.Ignore(s => s.WeekCount);
             semester.Ignore(s => s.FirstDay);
             semester.Ignore(s => s.LastDay);
@@ -122,7 +123,18 @@ public sealed class CampusPulseDbContext(DbContextOptions<CampusPulseDbContext> 
         {
             day.ToTable("non_teaching_days");
             day.HasKey(d => new { d.SemesterId, d.Date });
-            day.Property(d => d.Reason).HasMaxLength(NonTeachingDay.ReasonMaxLength).IsRequired();
+            day.Property(d => d.ReasonRo).HasMaxLength(CalendarName.MaxLength).IsRequired();
+            day.Property(d => d.ReasonEn).HasMaxLength(CalendarName.MaxLength);
+            day.Ignore(d => d.Reason);
+        });
+
+        modelBuilder.Entity<SemesterBreak>(semesterBreak =>
+        {
+            semesterBreak.ToTable("semester_breaks");
+            semesterBreak.HasKey(b => new { b.SemesterId, b.From });
+            semesterBreak.Property(b => b.NameRo).HasMaxLength(CalendarName.MaxLength);
+            semesterBreak.Property(b => b.NameEn).HasMaxLength(CalendarName.MaxLength);
+            semesterBreak.Ignore(b => b.Name);
         });
 
         modelBuilder.Entity<Programme>(programme =>

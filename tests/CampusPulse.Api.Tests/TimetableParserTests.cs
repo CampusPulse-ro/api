@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using CampusPulse.Api.Timetable;
 using CampusPulse.Api.Timetable.Import;
 using CampusPulse.Domain.Timetable;
 
@@ -142,8 +143,8 @@ public sealed class TimetableParserTests
         calendar:
           firstWeekStartsOn: "2030-09-30"
           weeks: 14
-          breaks: [ { from: "2030-12-23", to: "2031-01-05" } ]
-          nonTeachingDays: [ { date: "2030-12-02", reason: "Zi libera" } ]
+          breaks: [ { from: "2030-12-23", to: "2031-01-05", name: { ro: "Vacanta de iarna", en: "Winter break" } } ]
+          nonTeachingDays: [ { date: "2030-12-02", reason: { ro: "Zi libera", en: "Day off" } } ]
         programmes:
           ALFA: "Programul Alfa"
           ROB: "Sisteme robotice"
@@ -617,16 +618,60 @@ public sealed class TimetableParserTests
         Assert.Equal(new DateOnly(2031, 1, 6), weeks[12]);
     }
 
+    private const string Breaks = """breaks: [ { from: "2030-12-23", to: "2031-01-05", name: { ro: "Vacanta de iarna", en: "Winter break" } } ]""";
+
     [Fact]
-    public void A_break_inside_a_teaching_week_makes_its_days_non_teaching()
+    public void A_break_inside_a_teaching_week_makes_its_days_non_teaching_under_its_name()
     {
-        var calendar = ImportOverrides.Parse(Overrides.Replace("""breaks: [ { from: "2030-12-23", to: "2031-01-05" } ]""",
-            """breaks: [ { from: "2030-12-23", to: "2031-01-05" }, { from: "2030-11-13", to: "2030-11-15" } ]""")).Calendar;
+        var calendar = ImportOverrides.Parse(Overrides.Replace(Breaks, Breaks[..^2]
+            + """, { from: "2030-11-13", to: "2030-11-15" }, { from: "2030-10-31", to: "2030-11-01", name: "Pod" } ]""")).Calendar;
 
         Assert.Equal(new DateOnly(2030, 11, 11), calendar.WeekStarts()[6]); // week 7 still counts
         Assert.Equal([new DateOnly(2030, 11, 13), new DateOnly(2030, 11, 14), new DateOnly(2030, 11, 15)],
-            calendar.Days().Where(d => d.Reason == "break").Select(d => d.Date));
+            calendar.Days().Where(d => d.Reason == CalendarOverrides.UnnamedBreak).Select(d => d.Date));
+        Assert.Equal([new DateOnly(2030, 10, 31), new DateOnly(2030, 11, 1)],
+            calendar.Days().Where(d => d.Reason == new CalendarName("Pod", null)).Select(d => d.Date));
+        Assert.Equal(["2030-12-23 Winter break", "2030-11-13 -", "2030-10-31 Pod"],
+            calendar.BreakDates().Select(b => $"{b.From:yyyy-MM-dd} {b.Name?.En ?? b.Name?.Ro ?? "-"}"));
     }
+
+    [Fact]
+    public void Calendar_names_come_in_both_languages_and_a_plain_string_is_Romanian_with_a_warning()
+    {
+        var both = ImportOverrides.Parse(Overrides);
+        Assert.Equal((new DateOnly(2030, 12, 2), new CalendarName("Zi libera", "Day off")), Assert.Single(both.Calendar.Days()));
+        Assert.Equal(new CalendarName("Vacanta de iarna", "Winter break"), Assert.Single(both.Calendar.BreakDates()).Name);
+        Assert.DoesNotContain(both.Warnings(), w => w.Contains("English name", StringComparison.Ordinal));
+
+        var plain = ImportOverrides.Parse(Overrides.Replace("""reason: { ro: "Zi libera", en: "Day off" }""", """reason: "Zi libera" """)
+            .Replace("""name: { ro: "Vacanta de iarna", en: "Winter break" }""", """name: { ro: "Vacanta de iarna" }"""));
+        Assert.Equal(new CalendarName("Zi libera", null), Assert.Single(plain.Calendar.Days()).Reason);
+        Assert.Contains("overrides: calendar.nonTeachingDays 2030-12-02: reason has no English name, so the English UI shows the Romanian "
+            + "one; write it as { ro: ..., en: ... }", plain.Warnings());
+        Assert.Contains(plain.Warnings(), w => w.StartsWith("overrides: calendar.breaks 2030-12-23: name has no English name", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("""reason: { ro: "Zi libera", en: "Day off" }""", "reason: ~", "calendar.nonTeachingDays 2030-12-02: reason needs a Romanian name")]
+    [InlineData("""reason: { ro: "Zi libera", en: "Day off" }""", """reason: { en: "Day off" }""", "reason needs a Romanian name")]
+    [InlineData("""to: "2031-01-05", name""", """to: "2030-12-01", name""", "calendar.breaks 2030-12-23: it ends (2030-12-01) before it starts")]
+    [InlineData("""name: { ro: "Vacanta de iarna", en: "Winter break" }""", """name: { ro: " ", en: "Winter break" }""", "name needs a Romanian name")]
+    public void Bad_calendar_names_are_refused(string from, string to, string message)
+    {
+        Assert.Contains(from, Overrides);
+        var error = Assert.Throws<FormatException>(() => ImportOverrides.Parse(Overrides.Replace(from, to)));
+        Assert.Contains(message, error.Message);
+    }
+
+    [Theory]
+    [InlineData("""reason: { ro: "Zi libera", fr: "Jour" }""")]
+    [InlineData("""reason: { ro: [ "Zi libera" ] }""")]
+    public void A_calendar_name_with_another_key_or_shape_is_refused(string reason) =>
+        Assert.Throws<YamlDotNet.Core.YamlException>(() => ImportOverrides.Parse(Overrides.Replace("""reason: { ro: "Zi libera", en: "Day off" }""", reason)));
+
+    [Fact]
+    public void A_name_without_English_is_served_in_Romanian_for_both() =>
+        Assert.Equal(new CalendarNameResponse("Zi libera", "Zi libera"), CalendarNameResponse.Of(new CalendarName("Zi libera", null)));
 
     [Theory]
     [InlineData("firstWeekStartsOn: \"2030-09-30\"", "firstWeekStartsOn: \"2030-10-01\"")]

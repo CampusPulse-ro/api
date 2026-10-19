@@ -37,7 +37,9 @@ public sealed class SemesterTests
         var semester = new Semester("2026-2027", 1, Now);
         var starts = Enumerable.Range(0, 12).Select(i => new DateOnly(2026, 9, 28).AddDays(7 * i))
             .Concat([new DateOnly(2027, 1, 11), new DateOnly(2027, 1, 18)]).ToList();
-        semester.SetCalendar(starts, [(new DateOnly(2026, 11, 30), "Sf. Andrei"), (new DateOnly(2026, 12, 1), "Ziua Națională")]);
+        semester.SetCalendar(starts,
+            [(new DateOnly(2026, 11, 30), new CalendarName("Zi libera", null)), (new DateOnly(2026, 12, 1), new CalendarName("Zi libera", "Day off"))],
+            [(new DateOnly(2026, 12, 21), new DateOnly(2027, 1, 10), new CalendarName("Vacanta", "Break"))]);
         return semester;
     }
 
@@ -67,12 +69,30 @@ public sealed class SemesterTests
     }
 
     [Fact]
+    public void Names_keep_both_languages_and_a_break_may_have_none()
+    {
+        var semester = Upt();
+
+        Assert.Equal(new CalendarName("Zi libera", "Day off"), semester.NonTeachingDays.Single(d => d.Date == new DateOnly(2026, 12, 1)).Reason);
+        Assert.Null(semester.NonTeachingDays.Single(d => d.Date == new DateOnly(2026, 11, 30)).ReasonEn);
+        var winter = Assert.Single(semester.Breaks);
+        Assert.Equal((new DateOnly(2026, 12, 21), new DateOnly(2027, 1, 10), "Break"), (winter.From, winter.To, winter.Name?.En));
+        Assert.Null(new CalendarName("Vacanta", " ").En);
+        Assert.Throws<ArgumentException>(() => new CalendarName(" ", "Break"));
+
+        semester.SetCalendar([new DateOnly(2026, 9, 28)], [], [(new DateOnly(2026, 10, 1), new DateOnly(2026, 10, 2), null)]);
+        Assert.Null(Assert.Single(semester.Breaks).Name);
+        Assert.Throws<ArgumentException>(() => semester.SetCalendar([new DateOnly(2026, 9, 28)], [],
+            [(new DateOnly(2026, 10, 2), new DateOnly(2026, 10, 1), null)]));
+    }
+
+    [Fact]
     public void Weeks_start_on_Mondays_in_order()
     {
         var semester = new Semester("2026-2027", 1, Now);
 
-        Assert.Throws<ArgumentException>(() => semester.SetCalendar([new DateOnly(2026, 9, 29)], []));
-        Assert.Throws<ArgumentException>(() => semester.SetCalendar([new DateOnly(2026, 10, 5), new DateOnly(2026, 9, 28)], []));
+        Assert.Throws<ArgumentException>(() => semester.SetCalendar([new DateOnly(2026, 9, 29)], [], []));
+        Assert.Throws<ArgumentException>(() => semester.SetCalendar([new DateOnly(2026, 10, 5), new DateOnly(2026, 9, 28)], [], []));
         Assert.Throws<ArgumentOutOfRangeException>(() => new Semester("2026-2027", 3, Now));
     }
 

@@ -273,8 +273,9 @@ these files with UPT accounts only. Dates are Romanian dates. The API expands th
 dates itself (teaching weeks, the break, non-teaching days, each slot's weeks), so no client handles
 week parity.
 
-- `GET /semesters/current`: the teaching weeks with their dates, non-teaching days, today and its
-  teaching week.
+- `GET /semesters/current`: the teaching weeks with their dates, non-teaching days (`reason`), the breaks
+  (`from`, `to`, `name`, null when unnamed), today and its teaching week. Calendar names come as `{ ro, en }`:
+  show the one of the UI language (`en` repeats `ro` when the timetable gives no English name).
 - `GET /timetable/programmes`: programmes → years → study groups, to pick a group from.
 - `GET /me/settings` / `PUT /me/settings` `{ studyGroupId }` (null clears it): the student's group.
   400 for a group that doesn't exist, 404 without an account.
