@@ -123,7 +123,11 @@ public sealed class TimetableEndpointsTests(ImportedTimetable timetable) : IClas
 
         Assert.Equal(("2030-2031", 1, 14, 2), (semester.AcademicYear, semester.Number, semester.Weeks.Count, semester.TodayWeek));
         Assert.Equal(new DateOnly(2030, 10, 7), semester.Today);
-        Assert.Equal([new DateOnly(2030, 12, 2)], semester.NonTeachingDays.Select(d => d.Date));
+        var day = Assert.Single(semester.NonTeachingDays);
+        Assert.Equal((new DateOnly(2030, 12, 2), new CalendarNameResponse("Zi libera", "Day off")), (day.Date, day.Reason));
+        var winter = Assert.Single(semester.Breaks);
+        Assert.Equal((new DateOnly(2030, 12, 23), new DateOnly(2031, 1, 5), new CalendarNameResponse("Vacanta de iarna", "Winter break")),
+            (winter.From, winter.To, winter.Name));
     }
 
     /// <summary>At 22:30 UTC on Sunday it is already Monday 01:30 in Bucharest: today is Monday.</summary>

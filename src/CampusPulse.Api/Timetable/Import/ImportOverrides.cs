@@ -1,6 +1,8 @@
 using System.Globalization;
 using System.Text.RegularExpressions;
 using CampusPulse.Domain.Timetable;
+using YamlDotNet.Core;
+using YamlDotNet.Core.Events;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
@@ -42,6 +44,7 @@ public sealed class ImportOverrides
     {
         var deserializer = new DeserializerBuilder()
             .WithNamingConvention(CamelCaseNamingConvention.Instance)
+            .WithTypeConverter(new CalendarText.Converter())
             .Build();
         var overrides = deserializer.Deserialize<ImportOverrides?>(yaml) ?? new ImportOverrides();
         overrides.Validate();
@@ -56,6 +59,7 @@ public sealed class ImportOverrides
         }
 
         _ = Calendar.WeekStarts();
+        Calendar.ValidateNames();
         if (Sources.Count == 0)
         {
             throw new FormatException("overrides: sources (workbook id → its sheets) is required.");
@@ -120,7 +124,8 @@ public sealed class ImportOverrides
     /// <summary>What's odd about the overrides themselves: sheets that no source lists.</summary>
     public IEnumerable<string> Warnings() =>
         Sheets.Where(s => !s.Value.Skip && !Sources.Values.Any(source => source.Sheets.Contains(s.Key)))
-            .Select(s => $"overrides: sheets.\"{s.Key}\" is in no source, so nothing reads it");
+            .Select(s => $"overrides: sheets.\"{s.Key}\" is in no source, so nothing reads it")
+            .Concat(Calendar.NameWarnings());
 
     /// <summary>The source whose sheets the workbook has; null (with the problem) when it has none of any
     /// source's or sheets of several.</summary>
@@ -311,11 +316,15 @@ public sealed class CalendarOverrides
         return starts;
     }
 
+    /// <summary>What a break's days are called when the break has no name.</summary>
+    public static readonly CalendarName UnnamedBreak = new("Vacanță", "Break");
+
     /// <summary>The non-teaching days: the listed ones, and the days of a break that only covers part of
-    /// a teaching week (one starting on a Wednesday leaves that week's Monday and Tuesday).</summary>
-    public IEnumerable<(DateOnly Date, string Reason)> Days()
+    /// a teaching week (one starting on a Wednesday leaves that week's Monday and Tuesday), under the break's name.</summary>
+    public IEnumerable<(DateOnly Date, CalendarName Reason)> Days()
     {
-        var days = NonTeachingDays.Select(d => (DateRange.Parse(d.Date, "calendar.nonTeachingDays[].date"), d.Reason)).ToList();
+        var days = NonTeachingDays.Select(d => (Date: DateRange.Parse(d.Date, "calendar.nonTeachingDays[].date"), Reason: d.Reason!.Name()))
+            .ToList();
         var weeks = WeekStarts();
         foreach (var range in Breaks)
         {
@@ -324,15 +333,116 @@ public sealed class CalendarOverrides
             {
                 for (var day = monday; day <= monday.AddDays(6); day = day.AddDays(1))
                 {
-                    if (day >= from && day <= to && days.All(d => d.Item1 != day))
+                    if (day >= from && day <= to && days.All(d => d.Date != day))
                     {
-                        days.Add((day, "break"));
+                        days.Add((day, range.Name?.Name() ?? UnnamedBreak));
                     }
                 }
             }
         }
 
         return days;
+    }
+
+    /// <summary>The breaks, with their names (null when unnamed).</summary>
+    public IEnumerable<(DateOnly From, DateOnly To, CalendarName? Name)> BreakDates() =>
+        Breaks.Select(b => (b.FromDate(), b.ToDate(), b.Name?.Name()));
+
+    internal void ValidateNames()
+    {
+        foreach (var day in NonTeachingDays)
+        {
+            var where = $"calendar.nonTeachingDays {day.Date}: reason";
+            if (day.Reason is null || string.IsNullOrWhiteSpace(day.Reason.Ro))
+            {
+                throw new FormatException($"overrides: {where} needs a Romanian name (\"...\" or {{ ro: ..., en: ... }}).");
+            }
+
+            day.Reason.Check(where);
+        }
+
+        foreach (var range in Breaks)
+        {
+            if (range.ToDate() < range.FromDate())
+            {
+                throw new FormatException($"overrides: calendar.breaks {range.From}: it ends ({range.To}) before it starts.");
+            }
+
+            range.Name?.Check($"calendar.breaks {range.From}: name");
+        }
+    }
+
+    /// <summary>Names given in Romanian only: the English UI shows those in Romanian.</summary>
+    internal IEnumerable<string> NameWarnings() =>
+        NonTeachingDays.Where(d => d.Reason?.En is null).Select(d => $"calendar.nonTeachingDays {d.Date}: reason")
+            .Concat(Breaks.Where(b => b.Name is { En: null }).Select(b => $"calendar.breaks {b.From}: name"))
+            .Select(where => $"overrides: {where} has no English name, so the English UI shows the Romanian one; "
+                + "write it as { ro: ..., en: ... }");
+}
+
+/// <summary>
+/// A calendar name in the overrides: <c>"Ziua Națională a României"</c> (Romanian only: warned) or
+/// <c>{ ro: "Ziua Națională a României", en: "Romania's National Day" }</c>.
+/// </summary>
+public sealed class CalendarText
+{
+    public string Ro { get; set; } = "";
+
+    public string? En { get; set; }
+
+    public CalendarName Name() => new(Ro, En);
+
+    internal void Check(string where)
+    {
+        if (string.IsNullOrWhiteSpace(Ro))
+        {
+            throw new FormatException($"overrides: {where} needs a Romanian name (ro).");
+        }
+
+        if (Ro.Length > CalendarName.MaxLength || En?.Length > CalendarName.MaxLength)
+        {
+            throw new FormatException($"overrides: {where} is longer than {CalendarName.MaxLength} characters.");
+        }
+    }
+
+    /// <summary>Reads either form; any key but ro and en is refused, like every unknown key.</summary>
+    internal sealed class Converter : IYamlTypeConverter
+    {
+        public bool Accepts(Type type) => type == typeof(CalendarText);
+
+        public object? ReadYaml(IParser parser, Type type, ObjectDeserializer rootDeserializer)
+        {
+            if (parser.TryConsume<Scalar>(out var scalar))
+            {
+                return scalar.Value.Length == 0 || (scalar.IsPlainImplicit && scalar.Value is "~" or "null")
+                    ? null
+                    : new CalendarText { Ro = scalar.Value };
+            }
+
+            var start = parser.Consume<MappingStart>();
+            var text = new CalendarText();
+            while (!parser.TryConsume<MappingEnd>(out _))
+            {
+                var key = parser.Consume<Scalar>();
+                var value = parser.Consume<Scalar>();
+                switch (key.Value)
+                {
+                    case "ro":
+                        text.Ro = value.Value;
+                        break;
+                    case "en":
+                        text.En = value.Value.Length == 0 ? null : value.Value;
+                        break;
+                    default:
+                        throw new YamlException(key.Start, key.End, $"\"{key.Value}\" isn't ro or en (a calendar name at {start.Start})");
+                }
+            }
+
+            return text;
+        }
+
+        public void WriteYaml(IEmitter emitter, object? value, Type type, ObjectSerializer serializer) =>
+            throw new NotSupportedException("The overrides are only read.");
     }
 }
 
@@ -341,6 +451,9 @@ public sealed class DateRange
     public string From { get; set; } = "";
 
     public string To { get; set; } = "";
+
+    /// <summary>A break's name ("Vacanța de iarnă" / "Winter break"); optional.</summary>
+    public CalendarText? Name { get; set; }
 
     public DateOnly FromDate() => Parse(From, "calendar.breaks[].from");
 
@@ -356,7 +469,8 @@ public sealed class NonTeachingDayOverride
 {
     public string Date { get; set; } = "";
 
-    public string Reason { get; set; } = "";
+    /// <summary>Why there are no classes: a name in Romanian, or in Romanian and English.</summary>
+    public CalendarText? Reason { get; set; }
 }
 
 public enum ColumnRole

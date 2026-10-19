@@ -154,11 +154,12 @@ semester: { academicYear: "2030-2031", number: 1 }
 
 # Week 1 starts on a Monday; each following Monday starts the next week, except whole weeks
 # (Monday-Friday) inside a break. A break covering part of a week makes those days non-teaching.
+# Names are { ro: ..., en: ... }; a plain string is Romanian only (warned: the English UI shows it).
 calendar:
   firstWeekStartsOn: "2030-09-30"
   weeks: 14
-  breaks: [ { from: "2030-12-23", to: "2031-01-05" } ]
-  nonTeachingDays: [ { date: "2030-12-02", reason: "Public holiday" } ]
+  breaks: [ { from: "2030-12-23", to: "2031-01-05", name: { ro: "Vacanța de iarnă", en: "Winter break" } } ]   # name optional
+  nonTeachingDays: [ { date: "2030-12-02", reason: { ro: "Zi liberă", en: "Public holiday" } } ]
 
 programmes:                   # code -> name (codes are ours)
   ALFA: "Programme Alfa"

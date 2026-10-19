@@ -11,7 +11,17 @@ namespace CampusPulse.Api.Timetable;
 
 public sealed record TeachingWeekResponse(int Number, DateOnly StartsOn);
 
-public sealed record NonTeachingDayResponse(DateOnly Date, string Reason);
+/// <summary>A calendar name in Romanian and English: a client shows the one of its UI language. <see cref="En"/> is the
+/// Romanian name when the timetable gives no English one.</summary>
+public sealed record CalendarNameResponse(string Ro, string En)
+{
+    public static CalendarNameResponse Of(CalendarName name) => new(name.Ro, name.En ?? name.Ro);
+}
+
+public sealed record NonTeachingDayResponse(DateOnly Date, CalendarNameResponse Reason);
+
+/// <summary>A break between teaching weeks, both dates included; <see cref="Name"/> is null when the timetable names none.</summary>
+public sealed record BreakResponse(DateOnly From, DateOnly To, CalendarNameResponse? Name);
 
 /// <summary>Body of <c>GET /semesters/current</c>. <see cref="TodayWeek"/> is null outside teaching weeks.</summary>
 public sealed record SemesterResponse(
@@ -20,6 +30,7 @@ public sealed record SemesterResponse(
     int Number,
     IReadOnlyList<TeachingWeekResponse> Weeks,
     IReadOnlyList<NonTeachingDayResponse> NonTeachingDays,
+    IReadOnlyList<BreakResponse> Breaks,
     DateOnly Today,
     int? TodayWeek);
 
@@ -207,7 +218,8 @@ public static class TimetableEndpoints
 
         return TypedResults.Ok(new SemesterResponse(semester.Id, semester.AcademicYear, semester.Number,
             [.. semester.Weeks.OrderBy(w => w.Number).Select(w => new TeachingWeekResponse(w.Number, w.StartsOn))],
-            [.. semester.NonTeachingDays.OrderBy(d => d.Date).Select(d => new NonTeachingDayResponse(d.Date, d.Reason))],
+            [.. semester.NonTeachingDays.OrderBy(d => d.Date).Select(d => new NonTeachingDayResponse(d.Date, CalendarNameResponse.Of(d.Reason)))],
+            [.. semester.Breaks.OrderBy(b => b.From).Select(b => new BreakResponse(b.From, b.To, b.Name is { } name ? CalendarNameResponse.Of(name) : null))],
             today, semester.WeekOf(today)));
     }
 
@@ -587,7 +599,8 @@ public static class TimetableEndpoints
 
     private static async Task<Semester?> CurrentSemesterAsync(CampusPulseDbContext db, DateOnly today, CancellationToken cancellationToken)
     {
-        var semesters = (await db.Semesters.Include(s => s.Weeks).Include(s => s.NonTeachingDays).ToListAsync(cancellationToken))
+        var semesters = (await db.Semesters.Include(s => s.Weeks).Include(s => s.NonTeachingDays).Include(s => s.Breaks)
+            .ToListAsync(cancellationToken))
             .Where(s => s.WeekCount > 0)
             .ToList();
         return semesters.FirstOrDefault(s => s.FirstDay <= today && today <= s.LastDay)
