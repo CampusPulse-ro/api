@@ -38,16 +38,16 @@
     <PackageReference Include="ClosedXML" Version="0.105.1" />
     <!-- The import's overrides file. MIT. -->
     <PackageReference Include="YamlDotNet" Version="18.1.0" />
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.11" />
-    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.13" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.14" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.14" />
     <!-- Writes the OpenAPI document at build time: openapi/v1.json at the repo root is the
          contract the mobile and web clients generate their types from, committed, and CI fails
          when it is stale. -->
-    <PackageReference Include="Microsoft.Extensions.ApiDescription.Server" Version="10.0.13">
+    <PackageReference Include="Microsoft.Extensions.ApiDescription.Server" Version="10.0.14">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.13">
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.14">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
@@ -55,7 +55,7 @@
          GHSA-v5pm-xwqc-g5wc (high: circular schema refs abort parsing). 2.7.5 is the first
          patched 2.x release. Do NOT jump to 3.x: it makes IOpenApiMediaType.Example read-only
          and the ASP.NET Core 10 XML-comment source generator fails to compile. -->
-    <PackageReference Include="Microsoft.OpenApi" Version="2.12.2" />
+    <PackageReference Include="Microsoft.OpenApi" Version="2.13.0" />
     <PackageReference Include="Serilog.Extensions.Logging" Version="10.0.0" />
     <PackageReference Include="Serilog.Formatting.Compact" Version="3.0.0" />
     <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
