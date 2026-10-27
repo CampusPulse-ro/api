@@ -55,7 +55,7 @@ public sealed partial class ExpoPushSender(HttpClient client, ILogger<ExpoPushSe
         catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             LogUnreachable(logger, "send", "timeout");
-            return Refused(batch, PushErrors.RequestFailed);
+            return Refused(batch, PushErrors.TimedOut);
         }
         catch (Exception e) when (e is JsonException or NotSupportedException)
         {

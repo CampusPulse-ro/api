@@ -32,5 +32,5 @@ public sealed class ClassReminderTests
     }
 
     [Fact]
-    public void The_longest_lead_is_the_maximum() => Assert.Equal(ReminderSettings.MaxMinutesBefore, ReminderSettings.AllowedMinutes.Max());
+    public void The_longest_lead_is_an_hour() => Assert.Equal(60, ReminderSettings.MaxMinutesBefore);
 }

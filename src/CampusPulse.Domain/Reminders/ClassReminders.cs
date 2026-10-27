@@ -10,7 +10,7 @@ public sealed class ReminderSettings
     public static readonly IReadOnlyList<int> AllowedMinutes = [5, 10, 15, 30, 60];
 
     /// <summary>The longest lead: how far ahead of a class a reminder can be due.</summary>
-    public const int MaxMinutesBefore = 60;
+    public static readonly int MaxMinutesBefore = AllowedMinutes.Max();
 
     private ReminderSettings()
     {
@@ -41,7 +41,8 @@ public sealed class ReminderSettings
 /// <summary>
 /// A class reminder that went out: one per student, date, start time and subject (Romanian date and time, as
 /// in the timetable), so a reminder is never sent twice, across ticks and restarts. Written just before the
-/// send; kept two days, then deleted by the sender. Deleted with the account (cascade from <c>users</c>).
+/// send (and removed again only when the push service certainly didn't take it); kept two days, then deleted by
+/// the sender. Deleted with the account (cascade from <c>users</c>).
 /// </summary>
 public sealed class SentClassReminder
 {

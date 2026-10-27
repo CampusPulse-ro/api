@@ -24,22 +24,21 @@ public sealed class ClassReminderRulesTests
     private static DateTimeOffset At(int hour, int minute, int second = 0) => new(2030, 11, 25, hour, minute, second, TimeSpan.Zero);
 
     [Fact]
-    public void Due_in_the_tick_whose_window_holds_start_minus_lead()
+    public void Due_from_start_minus_lead()
     {
-        // Due at 05:45: in (05:44, 05:45] and (05:44:30, 05:45:30], not in the windows before or after.
-        Assert.True(ClassReminderSender.IsDue(Start, Lead, At(5, 44), At(5, 45)));
-        Assert.True(ClassReminderSender.IsDue(Start, Lead, At(5, 44, 30), At(5, 45, 30)));
-        Assert.False(ClassReminderSender.IsDue(Start, Lead, At(5, 43), At(5, 44, 59)));
-        Assert.False(ClassReminderSender.IsDue(Start, Lead, At(5, 45), At(5, 46)));
+        Assert.False(ClassReminderSender.IsDue(Start, Lead, At(5, 44, 59)));
+        Assert.True(ClassReminderSender.IsDue(Start, Lead, At(5, 45)));
+        Assert.True(ClassReminderSender.IsDue(Start, Lead, At(5, 45, 30)));
     }
 
+    /// <summary>A late tick (a skipped one, a restart) still sends before the class; whether it went out already is
+    /// the sent records' business.</summary>
     [Fact]
-    public void A_late_tick_still_sends_before_the_class_but_never_once_it_started()
+    public void Still_due_until_the_class_starts_but_never_after()
     {
-        // A window that opened before the due time (a skipped tick, a restart) sends late, while the class hasn't begun.
-        Assert.True(ClassReminderSender.IsDue(Start, Lead, At(5, 0), At(5, 59, 59)));
-        Assert.False(ClassReminderSender.IsDue(Start, Lead, At(5, 0), At(6, 0)));
-        Assert.False(ClassReminderSender.IsDue(Start, Lead, At(5, 0), At(6, 30)));
+        Assert.True(ClassReminderSender.IsDue(Start, Lead, At(5, 59, 59)));
+        Assert.False(ClassReminderSender.IsDue(Start, Lead, At(6, 0)));
+        Assert.False(ClassReminderSender.IsDue(Start, Lead, At(6, 30)));
     }
 
     [Fact]
@@ -87,10 +86,8 @@ public sealed class ClassReminderRulesTests
     }
 
     [Fact]
-    public void The_look_back_is_the_longest_lead()
-    {
-        Assert.Equal(TimeSpan.FromMinutes(ReminderSettings.MaxMinutesBefore), ClassReminderSender.LookBack);
-    }
+    public void A_tick_looks_as_far_ahead_as_the_longest_lead() =>
+        Assert.Equal(TimeSpan.FromMinutes(ReminderSettings.AllowedMinutes.Max()), ClassReminderSender.MaxLead);
 
     private sealed class DefaultFactory : WebApplicationFactory<Program>
     {

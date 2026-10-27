@@ -41,10 +41,15 @@ public sealed record PushDeliveryResult(int Accepted, IReadOnlyDictionary<string
 public sealed partial class PushDelivery(CampusPulseDbContext db, IPushSender sender, TimeProvider time,
     ILogger<PushDelivery> logger)
 {
-    /// <summary>The push service couldn't be used at all (unreachable, or an answer it couldn't read), as opposed
-    /// to refusing a message: sending again later may work.</summary>
+    /// <summary>The push service couldn't be used (unreachable, too slow, or an answer that can't be read), as
+    /// opposed to refusing a message: sending again later may work.</summary>
     public static bool IsServiceFailure(string? errorCode) =>
-        errorCode is PushErrors.RequestFailed or PushErrors.MalformedResponse;
+        errorCode is PushErrors.RequestFailed or PushErrors.TimedOut or PushErrors.MalformedResponse;
+
+    /// <summary>The push service certainly didn't take the message (it was unreachable, or refused the whole
+    /// request), so sending it again can't make a duplicate. A timeout or an unreadable answer may hide an accepted
+    /// message.</summary>
+    public static bool CertainlyNotSent(string? errorCode) => errorCode is PushErrors.RequestFailed;
 
     /// <summary>The same notification to each of <paramref name="devices"/>.</summary>
     public async Task<PushDeliveryResult> SendAsync(IReadOnlyList<PushDevice> devices, string title, string body,

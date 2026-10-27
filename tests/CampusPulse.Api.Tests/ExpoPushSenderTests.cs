@@ -105,14 +105,14 @@ public sealed class ExpoPushSenderTests
     }
 
     [Fact]
-    public async Task A_timeout_refuses_the_batch_as_a_failed_request()
+    public async Task A_timeout_refuses_the_batch_as_timed_out_since_expo_may_have_taken_it()
     {
         var (sender, expo) = Create(timeout: TimeSpan.FromMilliseconds(100));
         expo.Delay = TimeSpan.FromSeconds(30);
 
         var tickets = await sender.SendAsync(Messages(2), default);
 
-        Assert.All(tickets, t => Assert.Equal(PushErrors.RequestFailed, t.Error));
+        Assert.All(tickets, t => Assert.Equal(PushErrors.TimedOut, t.Error));
     }
 
     [Fact]

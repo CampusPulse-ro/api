@@ -8,7 +8,8 @@ namespace CampusPulse.Api.Push;
 public interface IPushSender
 {
     /// <summary>One ticket per message, in the same order. A request that fails gives its messages
-    /// a <see cref="PushErrors.RequestFailed"/> ticket instead of throwing.</summary>
+    /// a <see cref="PushErrors.RequestFailed"/>, <see cref="PushErrors.TimedOut"/> or
+    /// <see cref="PushErrors.MalformedResponse"/> ticket instead of throwing.</summary>
     Task<IReadOnlyList<PushTicket>> SendAsync(IReadOnlyList<PushMessage> messages, CancellationToken cancellationToken);
 
     /// <summary>The receipts that are ready, by ticket id; a ticket that isn't in the result isn't
@@ -48,10 +49,14 @@ public static class PushErrors
     /// <summary>The app was uninstalled or the token is no longer valid: delete the device.</summary>
     public const string DeviceNotRegistered = "DeviceNotRegistered";
 
-    /// <summary>The push service couldn't be reached, timed out, or answered with an error status.</summary>
+    /// <summary>The push service couldn't be reached, or answered with an error status or request-level errors:
+    /// it took none of the messages.</summary>
     public const string RequestFailed = "RequestFailed";
 
-    /// <summary>The push service answered something this code can't read.</summary>
+    /// <summary>No answer in time: the push service may or may not have taken the messages.</summary>
+    public const string TimedOut = "TimedOut";
+
+    /// <summary>The push service answered something this code can't read: it may have taken the messages.</summary>
     public const string MalformedResponse = "MalformedResponse";
 
     /// <summary>An error without a code we could read.</summary>

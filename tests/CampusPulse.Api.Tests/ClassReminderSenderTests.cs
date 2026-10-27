@@ -189,12 +189,12 @@ public sealed class ClassReminderSenderTests(ImportedTimetable timetable) : ICla
 
         Assert.EndsWith(" in 10 min", Title(Assert.Single(MessagesTo(expo, student.Token))));
 
-        // Restarted again two minutes later: its first tick looks back an hour, finds the same class due, and the
-        // record of the send keeps it from going out twice.
+        // Restarted again two minutes later: the class is still in its reminder window, and the record of the
+        // send keeps it from going out twice.
         clock.Advance(TimeSpan.FromMinutes(2));
         using (var second = Start(expo, clock))
         {
-            Assert.Equal(new ClassReminderTick(Due: 1, Sent: 0, AlreadySent: 1, Retrying: 0), await second.Sender.TickAsync(default));
+            Assert.Equal(ClassReminderTick.Nothing, await second.Sender.TickAsync(default));
         }
 
         Assert.Single(MessagesTo(expo, student.Token));
@@ -289,6 +289,47 @@ public sealed class ClassReminderSenderTests(ImportedTimetable timetable) : ICla
         Assert.Equal(new ClassReminderTick(1, 1, 0, 0), await app.Sender.TickAsync(default));
         Assert.EndsWith(" in 5 min", Title(Assert.Single(MessagesTo(expo, late.Token))));
         Assert.Single(MessagesTo(expo, early.Token));
+    }
+
+    /// <summary>Turning reminders on (or a longer lead, or a first device) after a class's due time still reminds
+    /// before it starts, on a running instance as after a restart.</summary>
+    [PostgresFact]
+    public async Task Turning_reminders_on_late_still_reminds_before_the_class()
+    {
+        await ClearReminders();
+        var expo = new StubPushHandler();
+        var clock = new TestClock(November25At0800 - TimeSpan.FromMinutes(10) - TimeSpan.FromSeconds(30));
+        using var app = Start(expo, clock);
+        Assert.Equal(ClassReminderTick.Nothing, await app.Sender.TickAsync(default));
+        var (_, _, token) = await Student(app.Client, minutesBefore: 30);
+
+        clock.Advance(TimeSpan.FromMinutes(1));
+        Assert.Equal(new ClassReminderTick(1, 1, 0, 0), await app.Sender.TickAsync(default));
+
+        Assert.EndsWith(" in 10 min", Title(Assert.Single(MessagesTo(expo, token))));
+    }
+
+    /// <summary>An answer that can't be read (or a timeout) may hide an accepted message: the reminder stays recorded
+    /// rather than risk a second notification.</summary>
+    [PostgresFact]
+    public async Task An_unreadable_answer_is_not_sent_again()
+    {
+        await ClearReminders();
+        var expo = new StubPushHandler();
+        var clock = new TestClock(November25At0800 - TimeSpan.FromMinutes(15) + TimeSpan.FromSeconds(30));
+        using var app = Start(expo, clock);
+        var (_, userId, token) = await Student(app.Client, minutesBefore: 15);
+        expo.Respond = call => call.Path == "/--/api/v2/push/send"
+            ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("<html>busy</html>") }
+            : expo.Default(call);
+
+        Assert.Equal(new ClassReminderTick(Due: 1, Sent: 0, AlreadySent: 0, Retrying: 0), await app.Sender.TickAsync(default));
+        expo.Respond = expo.Default;
+        clock.Advance(TimeSpan.FromMinutes(1));
+        Assert.Equal(ClassReminderTick.Nothing, await app.Sender.TickAsync(default));
+
+        Assert.Single(MessagesTo(expo, token));
+        Assert.Equal(1, await SentRows(userId));
     }
 
     [PostgresFact]

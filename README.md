@@ -288,23 +288,29 @@ endpoints need sign-in and an account (404 like `GET /me` otherwise).
 - The text is English: the API doesn't know the app's language.
 
 **When:** `ClassReminderSender` ticks once a minute. For every student with a lead and at least one device it
-takes their classes, computed exactly as `GET /me/timetable` computes them (`ClassSchedule`, so nothing on a
-non-teaching day or in a break), and sends a reminder for each class whose start (Romanian time) minus the lead
-falls since the previous tick. A class that has already started gets none. The first tick after a start looks
-back an hour (the longest lead), so after a restart or a deploy whatever is still before its class goes out,
-late, with the minutes actually left.
+takes their classes of today and tomorrow, computed exactly as `GET /me/timetable` computes them
+(`ClassSchedule`, so nothing on a non-teaching day or in a break). A class's reminder is due from its start
+(Romanian time) minus the lead until the class starts, and goes out at the first tick in that span. A class that
+has started gets none. Whether a reminder went out is recorded in the database, not in the process, so a skipped
+tick, a restart or a deploy sends the ones still before their class, late, with the minutes actually left. The
+same goes for a student who turns reminders on, picks a longer lead or registers a first device after a class's
+due time: they get that reminder before the class starts.
 
-**Never twice:** each reminder is recorded in `class_reminders_sent` (student, date, start, subject) just before
-it goes out, so no tick or restart sends it again.
+**Never twice:** each reminder is recorded in `class_reminders_sent` (student, date, start, subject), in one
+statement per tick, just before it goes out, and a recorded one is never sent again.
 - Changing the lead after a class's reminder went out sends no second one for that class.
 - A grid class and a picked offer of the same subject at the same time are one reminder.
-- If the push service couldn't take it at all (unreachable, or an answer that can't be read), the record is
-  dropped and the next tick tries again while the class hasn't started. A crash between the record and the send
-  loses that reminder rather than sending it twice.
+- When the push service certainly didn't take it (unreachable, or it refused the whole request: `RequestFailed`),
+  the record is dropped and the next tick tries again while the class hasn't started. A timeout (`TimedOut`) or an
+  answer that can't be read (`MalformedResponse`) may hide an accepted message, so those stay recorded: a missed
+  reminder rather than a doubled one.
+- From the record to the send, a tick runs to its end even when the API is stopping (a deploy). A crash in
+  between loses those reminders rather than sending them twice.
 - Records are deleted after 2 days, and with the account.
 
 Tickets, `DeviceNotRegistered` and receipts are handled as for any other send (above). A tick is two statements
-when nobody has reminders on, and a handful of small queries otherwise, however many students.
+when nobody has reminders on, and a handful of small queries otherwise (only the slots of today's and tomorrow's
+weekdays), however many students.
 
 **Logs:** one Information line per tick that had reminders due (`Class reminders: 3 due, 3 sent, 0 already
 sent, 0 to retry`), counts only, plus the push lines above. With `Reminders__Enabled=false`, one line at startup

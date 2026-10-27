@@ -20,9 +20,10 @@ public sealed class ReminderOptions
 }
 
 /// <summary>What one tick of <see cref="ClassReminderSender"/> did, in reminders (one per class, whatever the
-/// student's number of devices): <see cref="Due"/> found due, of which <see cref="Sent"/> reached the push service for
-/// at least one device, <see cref="AlreadySent"/> had gone out before, and <see cref="Retrying"/> couldn't be sent at
-/// all (the push service was down) and are tried again on the next tick.</summary>
+/// student's number of devices): <see cref="Due"/> found due and not yet sent, of which <see cref="Sent"/> reached
+/// the push service for at least one device, <see cref="AlreadySent"/> turned out to be recorded meanwhile (or the
+/// student's account was deleted), and <see cref="Retrying"/> certainly didn't reach it (it was unreachable or
+/// refused the request) and are left for the next tick. The rest were refused for every device (an uninstalled app).</summary>
 public sealed record ClassReminderTick(int Due, int Sent, int AlreadySent, int Retrying)
 {
     public static readonly ClassReminderTick Nothing = new(0, 0, 0, 0);
@@ -30,12 +31,12 @@ public sealed record ClassReminderTick(int Due, int Sent, int AlreadySent, int R
 
 /// <summary>
 /// Sends class reminders (CampusPulse-ro/api#53). Once a minute, for every student with a reminder setting and at
-/// least one device: their classes, computed exactly as <c>GET /me/timetable</c> does (<see cref="ClassSchedule"/>),
-/// whose start (Romanian time) minus the student's lead falls since the previous tick get one push each, on every
-/// device. A class that has already started gets none, so after a restart or a stalled tick the catch-up is at most
-/// the classes that haven't begun. Every reminder is recorded in <c>class_reminders_sent</c> just before it goes out,
-/// so none is sent twice, across ticks and restarts; a reminder the push service couldn't take at all is released and
-/// tried again on the next tick. Records older than <see cref="KeepSent"/> are deleted here. Logs counts only.
+/// least one device, it takes their classes, computed exactly as <c>GET /me/timetable</c> computes them
+/// (<see cref="ClassSchedule"/>). A class's reminder is due from its start (Romanian time) minus the student's lead
+/// until it starts, and goes out once: one push, on every device. Whether it went out is recorded in
+/// <c>class_reminders_sent</c>, not in this process, so a skipped tick, a restart or a deploy neither repeats nor
+/// misses one, and a class that has started gets none. Records older than <see cref="KeepSent"/> are deleted here.
+/// Logs counts only.
 /// </summary>
 public sealed partial class ClassReminderSender(IServiceScopeFactory scopes, TimeProvider time, IOptions<ReminderOptions> options,
     ILogger<ClassReminderSender> logger) : BackgroundService
@@ -44,15 +45,10 @@ public sealed partial class ClassReminderSender(IServiceScopeFactory scopes, Tim
 
     public static readonly TimeSpan Interval = TimeSpan.FromMinutes(1);
 
-    /// <summary>How far back a tick looks at most: the first one after a start, or one after ticks that failed. No
-    /// further than the longest lead, since a reminder due earlier is for a class that has started.</summary>
-    public static readonly TimeSpan LookBack = TimeSpan.FromMinutes(ReminderSettings.MaxMinutesBefore);
+    /// <summary>The longest lead: how far ahead of now a tick looks for classes.</summary>
+    public static readonly TimeSpan MaxLead = TimeSpan.FromMinutes(ReminderSettings.MaxMinutesBefore);
 
     public static readonly TimeSpan KeepSent = TimeSpan.FromDays(2);
-
-    /// <summary>The end of the last tick that left nothing to retry: the next one sends what fell due since. Null
-    /// until the first, which looks back <see cref="LookBack"/>.</summary>
-    private DateTimeOffset? _lastTick;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -71,24 +67,16 @@ public sealed partial class ClassReminderSender(IServiceScopeFactory scopes, Tim
             }
             catch (Exception e) when (!stoppingToken.IsCancellationRequested)
             {
-                // The window stays open: the next tick looks back to the last good one. Never stop the host over it.
+                // Whatever wasn't sent is still due on the next tick. Never stop the host over it.
                 LogTickFailed(logger, e.GetType().Name, e);
             }
         }
     }
 
-    /// <summary>One tick: sends the reminders due since the previous good tick (at most <see cref="LookBack"/> ago).
-    /// One at a time: the loop above is the only caller, besides tests with <see cref="ReminderOptions.Enabled"/> off.</summary>
+    /// <summary>One tick: sends the reminders that are due now and not yet sent.</summary>
     public async Task<ClassReminderTick> TickAsync(CancellationToken cancellationToken)
     {
-        var now = time.GetUtcNow();
-        var since = _lastTick is { } last && last > now - LookBack ? last : now - LookBack;
-        var tick = await SendDueAsync(since, now, cancellationToken);
-        if (tick.Retrying == 0)
-        {
-            _lastTick = now;
-        }
-
+        var tick = await SendDueAsync(time.GetUtcNow(), cancellationToken);
         if (tick.Due > 0)
         {
             LogTick(logger, tick.Due, tick.Sent, tick.AlreadySent, tick.Retrying);
@@ -97,10 +85,9 @@ public sealed partial class ClassReminderSender(IServiceScopeFactory scopes, Tim
         return tick;
     }
 
-    /// <summary>A reminder for a class starting at <paramref name="startsAt"/>, <paramref name="lead"/> ahead, is due
-    /// in the tick covering (<paramref name="since"/>, <paramref name="now"/>] unless the class has started.</summary>
-    public static bool IsDue(DateTimeOffset startsAt, TimeSpan lead, DateTimeOffset since, DateTimeOffset now) =>
-        startsAt > now && startsAt - lead > since && startsAt - lead <= now;
+    /// <summary>A reminder <paramref name="lead"/> ahead of a class starting at <paramref name="startsAt"/> is due from
+    /// <c>startsAt - lead</c> until the class starts.</summary>
+    public static bool IsDue(DateTimeOffset startsAt, TimeSpan lead, DateTimeOffset now) => startsAt - lead <= now && now < startsAt;
 
     /// <summary>"MSA in 15 min" (the short name, else the name; the minutes left, which is the lead unless the
     /// reminder is late) and "Lab · 303CP" (the kinds and the room, whichever there are).</summary>
@@ -121,7 +108,7 @@ public sealed partial class ClassReminderSender(IServiceScopeFactory scopes, Tim
         ["subjectId"] = occurrence.SubjectId.ToString(),
     };
 
-    private async Task<ClassReminderTick> SendDueAsync(DateTimeOffset since, DateTimeOffset now, CancellationToken cancellationToken)
+    private async Task<ClassReminderTick> SendDueAsync(DateTimeOffset now, CancellationToken cancellationToken)
     {
         await using var scope = scopes.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<CampusPulseDbContext>();
@@ -137,12 +124,11 @@ public sealed partial class ClassReminderSender(IServiceScopeFactory scopes, Tim
             return ClassReminderTick.Nothing;
         }
 
-        // A due class hasn't started and starts within its student's lead, at most an hour from now: today or,
-        // late in the evening, tomorrow (Romanian dates).
+        // A due class starts within the hour: today or, late in the evening, tomorrow (Romanian dates).
+        var (firstDay, lastDay) = (RomanianTime.DateOf(now), RomanianTime.DateOf(now + MaxLead));
         var students = await StudentTimetableChoices.LoadAsync(db, [.. leads.Keys], cancellationToken);
-        var schedule = await ClassSchedule.ForStudentsAsync(db, students, cancellationToken);
-        var (firstDay, lastDay) = (RomanianTime.DateOf(now), RomanianTime.DateOf(now + LookBack));
-        var due = new List<Due>();
+        var schedule = await ClassSchedule.ForStudentsAsync(db, students, firstDay, lastDay, cancellationToken);
+        var inWindow = new List<Due>();
         foreach (var student in students)
         {
             // One reminder per subject and start: a grid class and a picked offer of the same subject at the same
@@ -150,41 +136,41 @@ public sealed partial class ClassReminderSender(IServiceScopeFactory scopes, Tim
             foreach (var occurrence in schedule.ForStudent(student, firstDay, lastDay).DistinctBy(o => (o.Date, o.StartsAt, o.SubjectId)))
             {
                 var startsAt = RomanianTime.Instant(occurrence.Date, occurrence.StartsAt);
-                if (IsDue(startsAt, leads[student.UserId], since, now))
+                if (IsDue(startsAt, leads[student.UserId], now))
                 {
-                    due.Add(new Due(student.UserId, occurrence, startsAt));
+                    inWindow.Add(new Due(student.UserId, occurrence, startsAt));
                 }
             }
         }
 
+        if (inWindow.Count == 0)
+        {
+            return ClassReminderTick.Nothing;
+        }
+
+        var users = inWindow.Select(d => d.UserId).Distinct().ToList();
+        var sentBefore = (await db.SentClassReminders
+                .Where(r => users.Contains(r.UserId) && r.Date >= firstDay && r.Date <= lastDay)
+                .Select(r => new Key(r.UserId, r.Date, r.StartsAt, r.SubjectId))
+                .ToListAsync(cancellationToken))
+            .ToHashSet();
+        var devices = (await db.PushDevices.Where(d => users.Contains(d.UserId)).ToListAsync(cancellationToken)).ToLookup(d => d.UserId);
+        var due = inWindow.Where(d => !sentBefore.Contains(d.Key) && devices[d.UserId].Any()).ToList();
         if (due.Count == 0)
         {
             return ClassReminderTick.Nothing;
         }
 
-        var dueUsers = due.Select(d => d.UserId).Distinct().ToList();
-        var devices = (await db.PushDevices.Where(d => dueUsers.Contains(d.UserId)).ToListAsync(cancellationToken))
-            .ToLookup(d => d.UserId);
-        var claimed = new List<Due>();
-        var alreadySent = 0;
-        foreach (var reminder in due.Where(r => devices[r.UserId].Any()))
-        {
-            switch (await ClaimAsync(db, reminder, now, cancellationToken))
-            {
-                case true:
-                    claimed.Add(reminder);
-                    break;
-                case false:
-                    alreadySent++;
-                    break;
-            }
-        }
-
+        // From the claim to the send and the release, the tick runs to its end even when the host is stopping (a
+        // deploy): cancelled in between, it would leave records of reminders that never went out. Each request to
+        // the push service has its own timeout.
+        var claimed = await ClaimAsync(db, due, now, CancellationToken.None);
+        var toSend = due.Where(d => claimed.Contains(d.Key)).ToList();
         var messages = new List<(PushDevice Device, PushMessage Message)>();
         var owners = new List<int>();
-        for (var i = 0; i < claimed.Count; i++)
+        for (var i = 0; i < toSend.Count; i++)
         {
-            var reminder = claimed[i];
+            var reminder = toSend[i];
             var left = reminder.StartsAt - now;
             var (title, body) = Text(reminder.Occurrence, Math.Max(1, (int)Math.Ceiling(left.TotalMinutes)));
             var data = Data(reminder.Occurrence);
@@ -192,65 +178,102 @@ public sealed partial class ClassReminderSender(IServiceScopeFactory scopes, Tim
             {
                 // High priority: it's due in minutes, and Android may hold a normal one back. Worth delivering only
                 // until the class starts.
-                messages.Add((device, new PushMessage(device.Token, title, body)
-                {
-                    Data = data,
-                    HighPriority = true,
-                    TimeToLive = left,
-                }));
+                messages.Add((device, new PushMessage(device.Token, title, body) { Data = data, HighPriority = true, TimeToLive = left }));
                 owners.Add(i);
             }
         }
 
-        var delivery = scope.ServiceProvider.GetRequiredService<PushDelivery>();
-        var tickets = await delivery.SendEachAsync(messages, cancellationToken);
-        var outcomes = owners.Zip(tickets).GroupBy(x => x.First, x => x.Second).ToDictionary(g => g.Key, g => g.ToList());
-        int sent = 0, retrying = 0;
-        for (var i = 0; i < claimed.Count; i++)
-        {
-            var ticketsOf = outcomes.GetValueOrDefault(i) ?? [];
-            if (ticketsOf.Any(t => t.Ok))
-            {
-                sent++;
-            }
-            else if (ticketsOf.Count > 0 && ticketsOf.All(t => PushDelivery.IsServiceFailure(t.Error)))
-            {
-                // Nothing reached the push service: give the reminder back, so the next tick tries again (while the
-                // class hasn't started). Refused ones (a device gone) stay claimed: sending again changes nothing.
-                await ReleaseAsync(db, claimed[i], cancellationToken);
-                retrying++;
-            }
-        }
-
-        return new ClassReminderTick(due.Count, sent, alreadySent, retrying);
+        var tickets = await scope.ServiceProvider.GetRequiredService<PushDelivery>().SendEachAsync(messages, CancellationToken.None);
+        var ticketsOf = owners.Zip(tickets).ToLookup(x => x.First, x => x.Second);
+        var sent = Enumerable.Range(0, toSend.Count).Count(i => ticketsOf[i].Any(t => t.Ok));
+        // Not taken by the push service, for certain: give them back, so the next tick sends them while their class
+        // hasn't started. A timeout or an unreadable answer may hide an accepted message, so those stay recorded
+        // rather than risk a second notification; so do refusals (an uninstalled app), where sending again changes
+        // nothing.
+        var retry = Enumerable.Range(0, toSend.Count)
+            .Where(i => ticketsOf[i].All(t => PushDelivery.CertainlyNotSent(t.Error)))
+            .Select(i => toSend[i])
+            .ToList();
+        await ReleaseAsync(db, retry, CancellationToken.None);
+        return new ClassReminderTick(due.Count, sent, due.Count - toSend.Count, retry.Count);
     }
 
-    /// <summary>Records the reminder as sent, unless it was: true when this tick sends it, false when an earlier one
-    /// did, null when the student's account was deleted meanwhile. Before the send, so a crash in between loses a
-    /// reminder rather than sending it twice.</summary>
-    private static async Task<bool?> ClaimAsync(CampusPulseDbContext db, Due reminder, DateTimeOffset now, CancellationToken cancellationToken)
+    /// <summary>Records the reminders as sent, in one statement, and returns those this tick recorded: not the ones
+    /// recorded meanwhile, nor those of a deleted account. Before the send, so a crash in between loses a reminder
+    /// rather than sending it twice.</summary>
+    private static async Task<HashSet<Key>> ClaimAsync(CampusPulseDbContext db, IReadOnlyList<Due> reminders, DateTimeOffset now,
+        CancellationToken cancellationToken)
     {
+        var claimed = new HashSet<Key>();
+        await db.Database.OpenConnectionAsync(cancellationToken);
         try
         {
-            return await db.Database.ExecuteSqlAsync($"""
+            await using var command = KeysCommand(db, """
                 INSERT INTO class_reminders_sent (user_id, date, starts_at, subject_id, sent_at)
-                VALUES ({reminder.UserId}, {reminder.Occurrence.Date}, {reminder.Occurrence.StartsAt}, {reminder.Occurrence.SubjectId}, {now})
+                SELECT k.user_id, k.date, k.starts_at, k.subject_id, @now
+                FROM unnest(@users, @dates, @starts, @subjects) AS k (user_id, date, starts_at, subject_id)
+                WHERE EXISTS (SELECT 1 FROM users u WHERE u.id = k.user_id)
                 ON CONFLICT DO NOTHING
-                """, cancellationToken) == 1;
+                RETURNING user_id, date, starts_at, subject_id
+                """, reminders.Select(r => r.Key).ToList());
+            command.Parameters.AddWithValue("now", now);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                claimed.Add(new Key(reader.GetGuid(0), reader.GetFieldValue<DateOnly>(1), reader.GetFieldValue<TimeOnly>(2), reader.GetGuid(3)));
+            }
         }
-        catch (PostgresException e) when (e.SqlState == PostgresErrorCodes.ForeignKeyViolation)
+        finally
         {
-            return null;
+            await db.Database.CloseConnectionAsync();
+        }
+
+        return claimed;
+    }
+
+    /// <summary>Deletes the records of reminders that certainly didn't go out, in one statement.</summary>
+    private static async Task ReleaseAsync(CampusPulseDbContext db, IReadOnlyList<Due> reminders, CancellationToken cancellationToken)
+    {
+        if (reminders.Count == 0)
+        {
+            return;
+        }
+
+        await db.Database.OpenConnectionAsync(cancellationToken);
+        try
+        {
+            await using var command = KeysCommand(db, """
+                DELETE FROM class_reminders_sent s
+                USING unnest(@users, @dates, @starts, @subjects) AS k (user_id, date, starts_at, subject_id)
+                WHERE s.user_id = k.user_id AND s.date = k.date AND s.starts_at = k.starts_at AND s.subject_id = k.subject_id
+                """, reminders.Select(r => r.Key).ToList());
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        finally
+        {
+            await db.Database.CloseConnectionAsync();
         }
     }
 
-    private static Task ReleaseAsync(CampusPulseDbContext db, Due reminder, CancellationToken cancellationToken) =>
-        db.SentClassReminders
-            .Where(r => r.UserId == reminder.UserId && r.Date == reminder.Occurrence.Date
-                && r.StartsAt == reminder.Occurrence.StartsAt && r.SubjectId == reminder.Occurrence.SubjectId)
-            .ExecuteDeleteAsync(cancellationToken);
+    /// <summary>A command on the context's (open) connection with the keys as four parallel arrays, for
+    /// <c>unnest(@users, @dates, @starts, @subjects)</c>.</summary>
+    private static NpgsqlCommand KeysCommand(CampusPulseDbContext db, string sql, List<Key> keys)
+    {
+        var command = new NpgsqlCommand(sql, (NpgsqlConnection)db.Database.GetDbConnection());
+        command.Parameters.AddWithValue("users", keys.Select(k => k.UserId).ToArray());
+        command.Parameters.AddWithValue("dates", keys.Select(k => k.Date).ToArray());
+        command.Parameters.AddWithValue("starts", keys.Select(k => k.StartsAt).ToArray());
+        command.Parameters.AddWithValue("subjects", keys.Select(k => k.SubjectId).ToArray());
+        return command;
+    }
 
-    private sealed record Due(Guid UserId, OccurrenceResponse Occurrence, DateTimeOffset StartsAt);
+    /// <summary>A reminder's identity, as <c>class_reminders_sent</c> keys it.</summary>
+    private readonly record struct Key(Guid UserId, DateOnly Date, TimeOnly StartsAt, Guid SubjectId);
+
+    private sealed record Due(Guid UserId, OccurrenceResponse Occurrence, DateTimeOffset StartsAt)
+    {
+        public Key Key => new(UserId, Occurrence.Date, Occurrence.StartsAt, Occurrence.SubjectId);
+    }
 
     [LoggerMessage(EventId = 60, Level = LogLevel.Information,
         Message = "Class reminders: {Due} due, {Sent} sent, {AlreadySent} already sent, {Retrying} to retry")]

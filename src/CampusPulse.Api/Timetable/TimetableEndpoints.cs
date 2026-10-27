@@ -132,6 +132,7 @@ public static class TimetableEndpoints
 
     public static IEndpointRouteBuilder MapTimetable(this IEndpointRouteBuilder app)
     {
+        RomanianTime.EnsureAvailable();
         var timetable = app.MapGroup("").RequireAuthorization().WithTags("Timetable");
 
         timetable.MapGet("/semesters/current", GetCurrentSemester)
@@ -257,7 +258,7 @@ public static class TimetableEndpoints
             return NoGroup();
         }
 
-        var schedule = await ClassSchedule.LoadAsync(db, [group.Id], [], cancellationToken);
+        var schedule = await ClassSchedule.LoadAsync(db, [group.Id], [], first, last, cancellationToken);
         return TypedResults.Ok(await TimetableResponseAsync(db, group, first, last, schedule.ForGroup(group.Id, first, last), cancellationToken));
     }
 
@@ -277,11 +278,11 @@ public static class TimetableEndpoints
             .ToListAsync(cancellationToken);
         var subjectIds = subjects.Select(s => s.Id).ToList();
         var offers = await db.OfferedSlots.Where(o => subjectIds.Contains(o.SubjectId)).ToListAsync(cancellationToken);
-        var rooms = await RoomCodesAsync(db, offers.Select(o => o.RoomId), cancellationToken);
+        var rooms = await ClassSchedule.RoomCodesAsync(db, offers.Select(o => o.RoomId), cancellationToken);
         IReadOnlyList<ChoiceSubjectResponse> body = [.. subjects.OrderBy(s => s.Name, StringComparer.InvariantCulture).Select(s => new ChoiceSubjectResponse(
             s.Id, s.Name, s.ShortName, CampusVirtual.CourseUrl(s.CampusVirtualCourseId), s.Choice,
             [.. offers.Where(o => o.SubjectId == s.Id).OrderBy(o => o.Weekday).ThenBy(o => o.StartsAt)
-                .Select(o => new OfferedSlotResponse(o.Id, o.Kinds.List(), o.Weekday, o.StartsAt, o.EndsAt, Code(rooms, o.RoomId), o.Weeks.Weeks()))]))];
+                .Select(o => new OfferedSlotResponse(o.Id, o.Kinds.List(), o.Weekday, o.StartsAt, o.EndsAt, ClassSchedule.RoomCode(rooms, o.RoomId), o.Weeks.Weeks()))]))];
         return TypedResults.Ok(body);
     }
 
@@ -476,7 +477,7 @@ public static class TimetableEndpoints
         var group = student.StudyGroupId is { } groupId
             ? await db.StudyGroups.SingleOrDefaultAsync(g => g.Id == groupId, cancellationToken)
             : null;
-        var schedule = await ClassSchedule.ForStudentsAsync(db, [student], cancellationToken);
+        var schedule = await ClassSchedule.ForStudentsAsync(db, [student], first, last, cancellationToken);
         return TypedResults.Ok(await TimetableResponseAsync(db, group, first, last, schedule.ForStudent(student, first, last), cancellationToken));
     }
 
@@ -574,22 +575,10 @@ public static class TimetableEndpoints
     private static StudyGroupResponse GroupResponse(StudyGroup group, Programme programme) =>
         new(group.Id, programme.Code, programme.Name, group.Year, group.Series, group.Label);
 
-    private static async Task<Dictionary<Guid, string>> RoomCodesAsync(CampusPulseDbContext db, IEnumerable<Guid?> roomIds,
-        CancellationToken cancellationToken)
-    {
-        var ids = roomIds.OfType<Guid>().Distinct().ToList();
-        return ids.Count == 0 ? [] : await db.Rooms.Where(r => ids.Contains(r.Id)).ToDictionaryAsync(r => r.Id, r => r.Code, cancellationToken);
-    }
-
-    private static string? Code(Dictionary<Guid, string> rooms, Guid? roomId) => roomId is { } id ? rooms.GetValueOrDefault(id) : null;
-
     private static RoomResponse RoomResponseOf(Room room) => new(room.Code, room.Building, room.Floor, room.Capacity);
 
-    private static Task<User?> UserAsync(CampusPulseDbContext db, ClaimsPrincipal principal, CancellationToken cancellationToken)
-    {
-        var oid = MeEndpoint.Identity.From(principal).Oid;
-        return db.Users.SingleOrDefaultAsync(u => u.EntraObjectId == oid, cancellationToken);
-    }
+    private static Task<User?> UserAsync(CampusPulseDbContext db, ClaimsPrincipal principal, CancellationToken cancellationToken) =>
+        MeEndpoint.FindUserAsync(db, principal, cancellationToken);
 
     /// <summary>A unique-index collision (two first writes at once) or a missing row (the account was
     /// deleted between the read and the write).</summary>

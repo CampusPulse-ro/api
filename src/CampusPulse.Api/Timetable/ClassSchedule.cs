@@ -7,9 +7,12 @@ namespace CampusPulse.Api.Timetable;
 /// <summary>Romanian local time (Europe/Bucharest), which every date and time of the timetable is in.</summary>
 public static class RomanianTime
 {
-    /// <summary>Without the time-zone database the API would date every class in UTC, so the first timetable
-    /// request (or reminder tick) fails instead.</summary>
     public static readonly TimeZoneInfo Zone = TimeZoneInfo.FindSystemTimeZoneById("Europe/Bucharest");
+
+    /// <summary>Called at startup (<see cref="TimetableEndpoints.MapTimetable"/>): without the time-zone database the
+    /// API would date every class in UTC, so it doesn't start, rather than failing every timetable request and
+    /// reminder tick.</summary>
+    public static void EnsureAvailable() => _ = Zone.BaseUtcOffset;
 
     public static DateTime Local(DateTimeOffset instant) => TimeZoneInfo.ConvertTime(instant, Zone).DateTime;
 
@@ -49,85 +52,108 @@ public sealed record StudentTimetableChoices(Guid UserId, Guid? StudyGroupId, IR
 /// <summary>
 /// The classes of study groups and students, on dates: a group's grid slots, and for a student those minus the
 /// optional subjects they didn't choose, plus the offered slots they picked. Each lands on the dates of its weeks
-/// that have classes (teaching weeks minus non-teaching days), in Romanian dates and times. Loaded once for any
-/// number of groups and students, then expanded in memory: <c>GET /me/timetable</c> and
+/// that have classes (teaching weeks minus non-teaching days), in Romanian dates and times. Loaded once for a date
+/// range and any number of groups and students, then expanded in memory: <c>GET /me/timetable</c> and
 /// <c>GET /timetable/groups/{id}</c> use it for one, the class reminders for every student who has them on.
 /// </summary>
 public sealed class ClassSchedule
 {
-    private readonly List<TimetableSlot> _slots;
-    private readonly List<OfferedSlot> _offers;
+    private readonly DateOnly _from;
+    private readonly DateOnly _to;
+    private readonly ILookup<Guid, TimetableSlot> _slotsByGroup;
+    private readonly Dictionary<Guid, OfferedSlot> _offers;
     private readonly Dictionary<Guid, Subject> _subjects;
     private readonly Dictionary<Guid, string> _rooms;
     private readonly Dictionary<Guid, Semester> _semesters;
 
-    private ClassSchedule(List<TimetableSlot> slots, List<OfferedSlot> offers, Dictionary<Guid, Subject> subjects,
-        Dictionary<Guid, string> rooms, Dictionary<Guid, Semester> semesters)
+    private ClassSchedule(DateOnly from, DateOnly to, List<TimetableSlot> slots, List<OfferedSlot> offers,
+        Dictionary<Guid, Subject> subjects, Dictionary<Guid, string> rooms, Dictionary<Guid, Semester> semesters)
     {
-        _slots = slots;
-        _offers = offers;
+        _from = from;
+        _to = to;
+        _slotsByGroup = slots.SelectMany(s => s.Groups.Select(g => (g.StudyGroupId, Slot: s))).ToLookup(x => x.StudyGroupId, x => x.Slot);
+        _offers = offers.ToDictionary(o => o.Id);
         _subjects = subjects;
         _rooms = rooms;
         _semesters = semesters;
     }
 
-    /// <summary>The slots of <paramref name="groupIds"/> and the offered slots <paramref name="offeredSlotIds"/>,
-    /// with their subjects, rooms and semesters.</summary>
+    /// <summary>What the classes of <paramref name="groupIds"/> and the offered slots <paramref name="offeredSlotIds"/>
+    /// need from <paramref name="from"/> to <paramref name="to"/> (both included): their slots on those weekdays, with
+    /// their subjects, rooms and semesters.</summary>
     public static async Task<ClassSchedule> LoadAsync(CampusPulseDbContext db, IReadOnlyList<Guid> groupIds,
-        IReadOnlyList<Guid> offeredSlotIds, CancellationToken cancellationToken)
+        IReadOnlyList<Guid> offeredSlotIds, DateOnly from, DateOnly to, CancellationToken cancellationToken)
     {
         var (groups, offerIds) = (groupIds.ToList(), offeredSlotIds.ToList());
-        var slots = groups.Count == 0
-            ? []
-            : await db.TimetableSlots.Include(s => s.Groups)
-                .Where(s => s.Groups.Any(g => groups.Contains(g.StudyGroupId)))
-                .ToListAsync(cancellationToken);
-        var offers = offerIds.Count == 0
-            ? []
-            : await db.OfferedSlots.Where(o => offerIds.Contains(o.Id)).ToListAsync(cancellationToken);
+        // A range shorter than a week (a day's timetable, the reminders' today and tomorrow) loads only its weekdays.
+        var weekdays = Enumerable.Range(0, Math.Min(7, Math.Max(0, to.DayNumber - from.DayNumber + 1)))
+            .Select(i => from.AddDays(i).DayOfWeek).ToList();
+        var slotQuery = db.TimetableSlots.Include(s => s.Groups).Where(s => s.Groups.Any(g => groups.Contains(g.StudyGroupId)));
+        var offerQuery = db.OfferedSlots.Where(o => offerIds.Contains(o.Id));
+        if (weekdays.Count < 7)
+        {
+            slotQuery = slotQuery.Where(s => weekdays.Contains(s.Weekday));
+            offerQuery = offerQuery.Where(o => weekdays.Contains(o.Weekday));
+        }
+
+        var slots = groups.Count == 0 || weekdays.Count == 0 ? [] : await slotQuery.ToListAsync(cancellationToken);
+        var offers = offerIds.Count == 0 || weekdays.Count == 0 ? [] : await offerQuery.ToListAsync(cancellationToken);
         var subjectIds = slots.Select(s => s.SubjectId).Concat(offers.Select(o => o.SubjectId)).Distinct().ToList();
         var subjects = subjectIds.Count == 0
             ? []
             : await db.Subjects.Where(s => subjectIds.Contains(s.Id)).ToDictionaryAsync(s => s.Id, cancellationToken);
-        var roomIds = slots.Select(s => s.RoomId).Concat(offers.Select(o => o.RoomId)).OfType<Guid>().Distinct().ToList();
-        var rooms = roomIds.Count == 0
-            ? []
-            : await db.Rooms.Where(r => roomIds.Contains(r.Id)).ToDictionaryAsync(r => r.Id, r => r.Code, cancellationToken);
+        var rooms = await RoomCodesAsync(db, slots.Select(s => s.RoomId).Concat(offers.Select(o => o.RoomId)), cancellationToken);
         var semesterIds = subjects.Values.Select(s => s.SemesterId).Distinct().ToList();
         var semesters = semesterIds.Count == 0
             ? []
             : await db.Semesters.Include(s => s.Weeks).Include(s => s.NonTeachingDays)
                 .Where(s => semesterIds.Contains(s.Id)).ToDictionaryAsync(s => s.Id, cancellationToken);
-        return new ClassSchedule(slots, offers, subjects, rooms, semesters);
+        return new ClassSchedule(from, to, slots, offers, subjects, rooms, semesters);
     }
 
-    /// <summary>Everything the timetables of <paramref name="students"/> need.</summary>
+    /// <summary>Everything the timetables of <paramref name="students"/> need from <paramref name="from"/> to
+    /// <paramref name="to"/>.</summary>
     public static Task<ClassSchedule> ForStudentsAsync(CampusPulseDbContext db, IEnumerable<StudentTimetableChoices> students,
-        CancellationToken cancellationToken)
+        DateOnly from, DateOnly to, CancellationToken cancellationToken)
     {
         var list = students.ToList();
         return LoadAsync(db,
             [.. list.Select(s => s.StudyGroupId).OfType<Guid>().Distinct()],
             [.. list.SelectMany(s => s.Subjects).Select(s => s.OfferedSlotId).OfType<Guid>().Distinct()],
-            cancellationToken);
+            from, to, cancellationToken);
     }
 
-    /// <summary>A study group's classes from <paramref name="from"/> to <paramref name="to"/> (both included),
-    /// optional subjects included (marked).</summary>
+    /// <summary>A study group's classes from <paramref name="from"/> to <paramref name="to"/> (both included, within
+    /// the loaded range), optional subjects included (marked).</summary>
     public IReadOnlyList<OccurrenceResponse> ForGroup(Guid groupId, DateOnly from, DateOnly to) => Expand(groupId, choices: null, from, to);
 
-    /// <summary>A student's classes from <paramref name="from"/> to <paramref name="to"/> (both included): their
-    /// group's, minus optional subjects they didn't choose, plus the offered slots they picked. Without a group
-    /// only the picks.</summary>
+    /// <summary>A student's classes from <paramref name="from"/> to <paramref name="to"/> (both included, within the
+    /// loaded range): their group's, minus optional subjects they didn't choose, plus the offered slots they picked.
+    /// Without a group only the picks.</summary>
     public IReadOnlyList<OccurrenceResponse> ForStudent(StudentTimetableChoices student, DateOnly from, DateOnly to) =>
         Expand(student.StudyGroupId, student.Subjects, from, to);
+
+    /// <summary>The code of each of <paramref name="roomIds"/> that is a room.</summary>
+    internal static async Task<Dictionary<Guid, string>> RoomCodesAsync(CampusPulseDbContext db, IEnumerable<Guid?> roomIds,
+        CancellationToken cancellationToken)
+    {
+        var ids = roomIds.OfType<Guid>().Distinct().ToList();
+        return ids.Count == 0 ? [] : await db.Rooms.Where(r => ids.Contains(r.Id)).ToDictionaryAsync(r => r.Id, r => r.Code, cancellationToken);
+    }
+
+    internal static string? RoomCode(Dictionary<Guid, string> rooms, Guid? roomId) => roomId is { } id ? rooms.GetValueOrDefault(id) : null;
 
     /// <summary>In date and time order, then by subject name.</summary>
     private List<OccurrenceResponse> Expand(Guid? groupId, IReadOnlyList<StudentSubject>? choices, DateOnly from, DateOnly to)
     {
-        IEnumerable<TimetableSlot> slots = groupId is { } id ? _slots.Where(s => s.Groups.Any(g => g.StudyGroupId == id)) : [];
-        var pickedOfferIds = choices?.Select(c => c.OfferedSlotId).OfType<Guid>().ToHashSet() ?? [];
-        var offers = _offers.Where(o => pickedOfferIds.Contains(o.Id)).ToList();
+        if (from < _from || to > _to)
+        {
+            throw new ArgumentOutOfRangeException(nameof(to), $"{from:yyyy-MM-dd}..{to:yyyy-MM-dd} is outside the loaded {_from:yyyy-MM-dd}..{_to:yyyy-MM-dd}.");
+        }
+
+        IEnumerable<TimetableSlot> slots = groupId is { } id ? _slotsByGroup[id] : [];
+        var offers = choices?.Select(c => c.OfferedSlotId).OfType<Guid>().Distinct()
+            .Select(id => _offers.GetValueOrDefault(id)).OfType<OfferedSlot>().ToList() ?? [];
         if (choices is not null)
         {
             // A student's own timetable: an optional subject's classes only when they chose it.
@@ -145,8 +171,8 @@ public sealed class ClassSchedule
                 if (OnDate(_semesters[subject.SemesterId], slot.Weeks, date) is { } week)
                 {
                     occurrences.Add(new OccurrenceResponse(date, week, slot.StartsAt, slot.EndsAt, subject.Id, subject.Name, subject.ShortName,
-                        CampusVirtual.CourseUrl(subject.CampusVirtualCourseId), slot.Kinds.List(), Room(slot.RoomId), slot.Teacher, slot.Note,
-                        subject.Choice == SubjectChoice.Optional, slot.Id, null));
+                        CampusVirtual.CourseUrl(subject.CampusVirtualCourseId), slot.Kinds.List(), RoomCode(_rooms, slot.RoomId), slot.Teacher,
+                        slot.Note, subject.Choice == SubjectChoice.Optional, slot.Id, null));
                 }
             }
 
@@ -156,7 +182,7 @@ public sealed class ClassSchedule
                 if (OnDate(_semesters[subject.SemesterId], offer.Weeks, date) is { } week)
                 {
                     occurrences.Add(new OccurrenceResponse(date, week, offer.StartsAt, offer.EndsAt, subject.Id, subject.Name, subject.ShortName,
-                        CampusVirtual.CourseUrl(subject.CampusVirtualCourseId), offer.Kinds.List(), Room(offer.RoomId), null, null,
+                        CampusVirtual.CourseUrl(subject.CampusVirtualCourseId), offer.Kinds.List(), RoomCode(_rooms, offer.RoomId), null, null,
                         subject.Choice == SubjectChoice.Optional, null, offer.Id));
                 }
             }
@@ -169,6 +195,4 @@ public sealed class ClassSchedule
     /// that day, or not one of its weeks).</summary>
     private static int? OnDate(Semester semester, WeekSet weeks, DateOnly date) =>
         semester.HasClasses(date) && semester.WeekOf(date) is { } week && weeks.Contains(week) ? week : null;
-
-    private string? Room(Guid? roomId) => roomId is { } id ? _rooms.GetValueOrDefault(id) : null;
 }

@@ -45,7 +45,7 @@ public static class ReminderEndpoints
     internal static async Task<Results<Ok<ReminderSettingsResponse>, ProblemHttpResult>> GetReminders(ClaimsPrincipal principal,
         CampusPulseDbContext db, CancellationToken cancellationToken)
     {
-        if (await UserIdAsync(db, principal, cancellationToken) is not { } userId)
+        if (await MeEndpoint.FindUserAsync(db, principal, cancellationToken) is not { Id: var userId })
         {
             return MeEndpoint.NoAccount();
         }
@@ -71,7 +71,7 @@ public static class ReminderEndpoints
                 detail: $"minutesBefore must be one of {string.Join(", ", ReminderSettings.AllowedMinutes)}, or null for no reminders.");
         }
 
-        if (await UserIdAsync(db, principal, cancellationToken) is not { } userId)
+        if (await MeEndpoint.FindUserAsync(db, principal, cancellationToken) is not { Id: var userId })
         {
             return MeEndpoint.NoAccount();
         }
@@ -95,11 +95,5 @@ public static class ReminderEndpoints
         }
 
         return TypedResults.Ok(new ReminderSettingsResponse(lead));
-    }
-
-    private static async Task<Guid?> UserIdAsync(CampusPulseDbContext db, ClaimsPrincipal principal, CancellationToken cancellationToken)
-    {
-        var oid = MeEndpoint.Identity.From(principal).Oid;
-        return await db.Users.Where(u => u.EntraObjectId == oid).Select(u => (Guid?)u.Id).SingleOrDefaultAsync(cancellationToken);
     }
 }
