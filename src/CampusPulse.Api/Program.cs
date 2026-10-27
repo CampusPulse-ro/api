@@ -5,6 +5,7 @@ using CampusPulse.Api;
 using CampusPulse.Api.Auth;
 using CampusPulse.Api.Logging;
 using CampusPulse.Api.Push;
+using CampusPulse.Api.Reminders;
 using CampusPulse.Api.Timetable;
 using CampusPulse.Api.Timetable.Import;
 using CampusPulse.Api.Users;
@@ -55,6 +56,9 @@ builder.Services.AddSingleton(TimeProvider.System);
 
 // Push notifications through Expo, and the background check of their receipts (see PushSetup).
 builder.Services.AddCampusPulsePush();
+
+// Class reminders: a push before each class, at the lead the student picked (see ClassReminderSender).
+builder.Services.AddCampusPulseReminders(builder.Configuration);
 
 // Microsoft sign-in (UPT accounts). Unconfigured, it fails closed: see AuthSetup.
 var auth = builder.Services.AddCampusPulseAuth(builder.Configuration);
@@ -166,6 +170,7 @@ app.MapGet("/health/ready", async (CampusPulseDbContext db, CancellationToken re
 app.MapMe();
 app.MapPush();
 app.MapTimetable();
+app.MapReminders();
 
 app.Run();
 return 0;

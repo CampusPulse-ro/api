@@ -93,6 +93,57 @@ namespace CampusPulse.Infrastructure.Migrations
                     b.ToTable("push_receipts_pending", (string)null);
                 });
 
+            modelBuilder.Entity("CampusPulse.Domain.Reminders.ReminderSettings", b =>
+                {
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.Property<int>("MinutesBefore")
+                        .HasColumnType("integer")
+                        .HasColumnName("minutes_before");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.HasKey("UserId")
+                        .HasName("pk_reminder_settings");
+
+                    b.ToTable("reminder_settings", (string)null);
+                });
+
+            modelBuilder.Entity("CampusPulse.Domain.Reminders.SentClassReminder", b =>
+                {
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.Property<DateOnly>("Date")
+                        .HasColumnType("date")
+                        .HasColumnName("date");
+
+                    b.Property<TimeOnly>("StartsAt")
+                        .HasColumnType("time without time zone")
+                        .HasColumnName("starts_at");
+
+                    b.Property<Guid>("SubjectId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("subject_id");
+
+                    b.Property<DateTimeOffset>("SentAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("sent_at");
+
+                    b.HasKey("UserId", "Date", "StartsAt", "SubjectId")
+                        .HasName("pk_class_reminders_sent");
+
+                    b.HasIndex("SentAt")
+                        .HasDatabaseName("ix_class_reminders_sent_sent_at");
+
+                    b.ToTable("class_reminders_sent", (string)null);
+                });
+
             modelBuilder.Entity("CampusPulse.Domain.Timetable.NonTeachingDay", b =>
                 {
                     b.Property<Guid>("SemesterId")
@@ -780,6 +831,26 @@ namespace CampusPulse.Infrastructure.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired()
                         .HasConstraintName("fk_push_receipts_pending_push_devices_device_id");
+                });
+
+            modelBuilder.Entity("CampusPulse.Domain.Reminders.ReminderSettings", b =>
+                {
+                    b.HasOne("CampusPulse.Domain.Users.User", null)
+                        .WithOne()
+                        .HasForeignKey("CampusPulse.Domain.Reminders.ReminderSettings", "UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_reminder_settings_users_user_id");
+                });
+
+            modelBuilder.Entity("CampusPulse.Domain.Reminders.SentClassReminder", b =>
+                {
+                    b.HasOne("CampusPulse.Domain.Users.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_class_reminders_sent_users_user_id");
                 });
 
             modelBuilder.Entity("CampusPulse.Domain.Timetable.NonTeachingDay", b =>

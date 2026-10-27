@@ -130,12 +130,9 @@ public static class TimetableEndpoints
 {
     public const int MaxRangeDays = 31;
 
-    /// <summary>Found when the routes are mapped, at startup: without the time-zone database the API
-    /// would date every class in UTC, so it doesn't start.</summary>
-    private static readonly TimeZoneInfo Romania = TimeZoneInfo.FindSystemTimeZoneById("Europe/Bucharest");
-
     public static IEndpointRouteBuilder MapTimetable(this IEndpointRouteBuilder app)
     {
+        RomanianTime.EnsureAvailable();
         var timetable = app.MapGroup("").RequireAuthorization().WithTags("Timetable");
 
         timetable.MapGet("/semesters/current", GetCurrentSemester)
@@ -261,7 +258,8 @@ public static class TimetableEndpoints
             return NoGroup();
         }
 
-        return TypedResults.Ok(await TimetableAsync(db, group, first, last, choices: null, cancellationToken));
+        var schedule = await ClassSchedule.LoadAsync(db, [group.Id], [], first, last, cancellationToken);
+        return TypedResults.Ok(await TimetableResponseAsync(db, group, first, last, schedule.ForGroup(group.Id, first, last), cancellationToken));
     }
 
     /// <summary>The optional and pick-a-time subjects of a group's year, with every slot they're offered at.</summary>
@@ -280,11 +278,11 @@ public static class TimetableEndpoints
             .ToListAsync(cancellationToken);
         var subjectIds = subjects.Select(s => s.Id).ToList();
         var offers = await db.OfferedSlots.Where(o => subjectIds.Contains(o.SubjectId)).ToListAsync(cancellationToken);
-        var rooms = await RoomCodesAsync(db, offers.Select(o => o.RoomId), cancellationToken);
+        var rooms = await ClassSchedule.RoomCodesAsync(db, offers.Select(o => o.RoomId), cancellationToken);
         IReadOnlyList<ChoiceSubjectResponse> body = [.. subjects.OrderBy(s => s.Name, StringComparer.InvariantCulture).Select(s => new ChoiceSubjectResponse(
             s.Id, s.Name, s.ShortName, CampusVirtual.CourseUrl(s.CampusVirtualCourseId), s.Choice,
             [.. offers.Where(o => o.SubjectId == s.Id).OrderBy(o => o.Weekday).ThenBy(o => o.StartsAt)
-                .Select(o => new OfferedSlotResponse(o.Id, o.Kinds.List(), o.Weekday, o.StartsAt, o.EndsAt, Code(rooms, o.RoomId), o.Weeks.Weeks()))]))];
+                .Select(o => new OfferedSlotResponse(o.Id, o.Kinds.List(), o.Weekday, o.StartsAt, o.EndsAt, ClassSchedule.RoomCode(rooms, o.RoomId), o.Weeks.Weeks()))]))];
         return TypedResults.Ok(body);
     }
 
@@ -475,12 +473,12 @@ public static class TimetableEndpoints
             return MeEndpoint.NoAccount();
         }
 
-        var settings = await db.StudentSettings.SingleOrDefaultAsync(s => s.UserId == user.Id, cancellationToken);
-        var group = settings?.StudyGroupId is { } groupId
+        var student = (await StudentTimetableChoices.LoadAsync(db, [user.Id], cancellationToken)).Single();
+        var group = student.StudyGroupId is { } groupId
             ? await db.StudyGroups.SingleOrDefaultAsync(g => g.Id == groupId, cancellationToken)
             : null;
-        var picks = await db.StudentSubjects.Where(s => s.UserId == user.Id).ToListAsync(cancellationToken);
-        return TypedResults.Ok(await TimetableAsync(db, group, first, last, picks, cancellationToken));
+        var schedule = await ClassSchedule.ForStudentsAsync(db, [student], first, last, cancellationToken);
+        return TypedResults.Ok(await TimetableResponseAsync(db, group, first, last, schedule.ForStudent(student, first, last), cancellationToken));
     }
 
     internal static async Task<Ok<IReadOnlyList<RoomResponse>>> GetRooms(CampusPulseDbContext db, CancellationToken cancellationToken)
@@ -537,65 +535,16 @@ public static class TimetableEndpoints
             [.. occurrences.OrderBy(o => o.StartsAt).ThenBy(o => o.Subject, StringComparer.InvariantCulture)]));
     }
 
-    private static async Task<TimetableResponse> TimetableAsync(CampusPulseDbContext db, StudyGroup? group, DateOnly from, DateOnly to,
-        IReadOnlyList<StudentSubject>? choices, CancellationToken cancellationToken)
+    /// <summary>The body of a timetable: the classes, the group, and the notes of the group's year.</summary>
+    private static async Task<TimetableResponse> TimetableResponseAsync(CampusPulseDbContext db, StudyGroup? group, DateOnly from,
+        DateOnly to, IReadOnlyList<OccurrenceResponse> occurrences, CancellationToken cancellationToken)
     {
-        var slots = group is null
-            ? []
-            : await db.TimetableSlots.Where(s => s.Groups.Any(g => g.StudyGroupId == group.Id)).ToListAsync(cancellationToken);
-        var pickedOfferIds = choices?.Select(c => c.OfferedSlotId).OfType<Guid>().ToList() ?? [];
-        var offers = pickedOfferIds.Count == 0 ? [] : await db.OfferedSlots.Where(o => pickedOfferIds.Contains(o.Id)).ToListAsync(cancellationToken);
-        var subjectIds = slots.Select(s => s.SubjectId).Concat(offers.Select(o => o.SubjectId)).Distinct().ToList();
-        var subjects = await db.Subjects.Where(s => subjectIds.Contains(s.Id)).ToDictionaryAsync(s => s.Id, cancellationToken);
-        if (choices is not null)
-        {
-            // A student's own timetable: an optional subject's classes only when they chose it.
-            var chosen = choices.Select(c => c.SubjectId).ToHashSet();
-            slots = [.. slots.Where(s => subjects[s.SubjectId].Choice != SubjectChoice.Optional || chosen.Contains(s.SubjectId))];
-        }
-
-        var rooms = await RoomCodesAsync(db, slots.Select(s => s.RoomId).Concat(offers.Select(o => o.RoomId)), cancellationToken);
-        var semesterIds = subjects.Values.Select(s => s.SemesterId).Concat(group is null ? [] : [group.SemesterId]).Distinct().ToList();
-        var semesters = await db.Semesters.Include(s => s.Weeks).Include(s => s.NonTeachingDays)
-            .Where(s => semesterIds.Contains(s.Id)).ToDictionaryAsync(s => s.Id, cancellationToken);
-
-        var occurrences = new List<OccurrenceResponse>();
-        for (var date = from; date <= to; date = date.AddDays(1))
-        {
-            foreach (var slot in slots.Where(s => s.Weekday == date.DayOfWeek))
-            {
-                var subject = subjects[slot.SubjectId];
-                if (OnDate(semesters[subject.SemesterId], slot.Weeks, date) is { } week)
-                {
-                    occurrences.Add(new OccurrenceResponse(date, week, slot.StartsAt, slot.EndsAt, subject.Id, subject.Name, subject.ShortName,
-                        CampusVirtual.CourseUrl(subject.CampusVirtualCourseId), slot.Kinds.List(), Code(rooms, slot.RoomId), slot.Teacher, slot.Note, subject.Choice == SubjectChoice.Optional,
-                        slot.Id, null));
-                }
-            }
-
-            foreach (var offer in offers.Where(o => o.Weekday == date.DayOfWeek))
-            {
-                var subject = subjects[offer.SubjectId];
-                if (OnDate(semesters[subject.SemesterId], offer.Weeks, date) is { } week)
-                {
-                    occurrences.Add(new OccurrenceResponse(date, week, offer.StartsAt, offer.EndsAt, subject.Id, subject.Name, subject.ShortName,
-                        CampusVirtual.CourseUrl(subject.CampusVirtualCourseId), offer.Kinds.List(), Code(rooms, offer.RoomId), null, null, subject.Choice == SubjectChoice.Optional, null, offer.Id));
-                }
-            }
-        }
-
         var notes = group is null
             ? []
             : await db.TimetableNotes.Where(n => n.SemesterId == group.SemesterId && n.ProgrammeId == group.ProgrammeId && n.Year == group.Year)
                 .OrderBy(n => n.SourceCell).Select(n => new TimetableNoteResponse(n.Text)).ToListAsync(cancellationToken);
-        return new TimetableResponse(from, to, await GroupResponseAsync(db, group?.Id, cancellationToken),
-            [.. occurrences.OrderBy(o => o.Date).ThenBy(o => o.StartsAt).ThenBy(o => o.Subject, StringComparer.InvariantCulture)], notes);
+        return new TimetableResponse(from, to, await GroupResponseAsync(db, group?.Id, cancellationToken), occurrences, notes);
     }
-
-    /// <summary>The teaching week when a class with these weeks happens on this date, or null (no classes
-    /// that day, or not one of its weeks).</summary>
-    private static int? OnDate(Semester semester, WeekSet weeks, DateOnly date) =>
-        semester.HasClasses(date) && semester.WeekOf(date) is { } week && weeks.Contains(week) ? week : null;
 
     private static async Task<Semester?> CurrentSemesterAsync(CampusPulseDbContext db, DateOnly today, CancellationToken cancellationToken)
     {
@@ -626,22 +575,10 @@ public static class TimetableEndpoints
     private static StudyGroupResponse GroupResponse(StudyGroup group, Programme programme) =>
         new(group.Id, programme.Code, programme.Name, group.Year, group.Series, group.Label);
 
-    private static async Task<Dictionary<Guid, string>> RoomCodesAsync(CampusPulseDbContext db, IEnumerable<Guid?> roomIds,
-        CancellationToken cancellationToken)
-    {
-        var ids = roomIds.OfType<Guid>().Distinct().ToList();
-        return ids.Count == 0 ? [] : await db.Rooms.Where(r => ids.Contains(r.Id)).ToDictionaryAsync(r => r.Id, r => r.Code, cancellationToken);
-    }
-
-    private static string? Code(Dictionary<Guid, string> rooms, Guid? roomId) => roomId is { } id ? rooms.GetValueOrDefault(id) : null;
-
     private static RoomResponse RoomResponseOf(Room room) => new(room.Code, room.Building, room.Floor, room.Capacity);
 
-    private static Task<User?> UserAsync(CampusPulseDbContext db, ClaimsPrincipal principal, CancellationToken cancellationToken)
-    {
-        var oid = MeEndpoint.Identity.From(principal).Oid;
-        return db.Users.SingleOrDefaultAsync(u => u.EntraObjectId == oid, cancellationToken);
-    }
+    private static Task<User?> UserAsync(CampusPulseDbContext db, ClaimsPrincipal principal, CancellationToken cancellationToken) =>
+        MeEndpoint.FindUserAsync(db, principal, cancellationToken);
 
     /// <summary>A unique-index collision (two first writes at once) or a missing row (the account was
     /// deleted between the read and the write).</summary>
@@ -663,7 +600,7 @@ public static class TimetableEndpoints
             : null;
     }
 
-    internal static DateOnly Today(TimeProvider time) => DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(time.GetUtcNow(), Romania).DateTime);
+    internal static DateOnly Today(TimeProvider time) => RomanianTime.Today(time);
 
     private static ProblemHttpResult BadRange() => TypedResults.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Bad date range",
         detail: $"from must not be after to, the range is at most {MaxRangeDays} days, and both are in 2000-2100 (dates as yyyy-MM-dd).");

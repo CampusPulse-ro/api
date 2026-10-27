@@ -172,8 +172,7 @@ public static class PushEndpoints
         ClaimsPrincipal principal, CampusPulseDbContext db, PushDelivery delivery, TestNotificationLimit limit,
         HttpContext context, CancellationToken cancellationToken)
     {
-        var identity = MeEndpoint.Identity.From(principal);
-        var user = await db.Users.SingleOrDefaultAsync(u => u.EntraObjectId == identity.Oid, cancellationToken);
+        var user = await MeEndpoint.FindUserAsync(db, principal, cancellationToken);
         if (user is null)
         {
             return MeEndpoint.NoAccount();

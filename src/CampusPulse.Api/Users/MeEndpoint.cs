@@ -156,6 +156,13 @@ public static partial class MeEndpoint
         }
     }
 
+    /// <summary>The signed-in student's account, or null when they have none (answer <see cref="NoAccount"/>).</summary>
+    internal static Task<User?> FindUserAsync(CampusPulseDbContext db, ClaimsPrincipal principal, CancellationToken cancellationToken)
+    {
+        var oid = Identity.From(principal).Oid;
+        return db.Users.SingleOrDefaultAsync(u => u.EntraObjectId == oid, cancellationToken);
+    }
+
     internal static ProblemHttpResult NoAccount() => TypedResults.Problem(
         statusCode: StatusCodes.Status404NotFound,
         title: "No account",

@@ -54,6 +54,8 @@ public sealed class PostgresAppFactory : WebApplicationFactory<Program>, IAsyncL
         builder.UseSetting("ConnectionStrings:Postgres", ConnectionString
             ?? throw new InvalidOperationException("No test database: the test should have been skipped."));
         TestAuth.Configure(builder);
+        // No reminder ticks in the background of a test; the reminder tests drive them by hand (TickAsync).
+        builder.UseSetting("Reminders:Enabled", "false");
         builder.ConfigureTestServices(services => PushTesting.UseHandler(services, new NoNetworkHandler()));
     }
 
