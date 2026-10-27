@@ -16,7 +16,18 @@ public interface IPushSender
     Task<IReadOnlyDictionary<string, PushReceipt>> GetReceiptsAsync(IReadOnlyList<string> ticketIds, CancellationToken cancellationToken);
 }
 
-public sealed record PushMessage(string To, string Title, string Body);
+/// <summary>A notification for one device token. Optionally: <see cref="Data"/> for the app (Expo's <c>data</c>, about
+/// 4 KiB at most), <see cref="HighPriority"/> for something due soon (delivered at once, waking a sleeping Android phone;
+/// otherwise Android may hold it back to save battery), and <see cref="TimeToLive"/>, how long it's worth delivering to
+/// a phone that is offline (otherwise the push services keep it up to four weeks).</summary>
+public sealed record PushMessage(string To, string Title, string Body)
+{
+    public IReadOnlyDictionary<string, string>? Data { get; init; }
+
+    public bool HighPriority { get; init; }
+
+    public TimeSpan? TimeToLive { get; init; }
+}
 
 /// <summary>Accepted (<see cref="Id"/> is the ticket to read the receipt of later), or refused with
 /// an error code: Expo's (<c>DeviceNotRegistered</c>, <c>MessageTooBig</c>…) or one of

@@ -9,46 +9,71 @@ namespace CampusPulse.Api.Push;
 public sealed record PushDeliveryResult(int Accepted, IReadOnlyDictionary<string, int> Refused)
 {
     /// <summary>Nothing was accepted because the service itself failed, not because of the devices.</summary>
-    public bool ServiceFailed => Accepted == 0 && Refused.Count > 0
-        && Refused.Keys.All(code => code is PushErrors.RequestFailed or PushErrors.MalformedResponse);
+    public bool ServiceFailed => Accepted == 0 && Refused.Count > 0 && Refused.Keys.All(PushDelivery.IsServiceFailure);
+
+    public static PushDeliveryResult Of(IEnumerable<PushTicket> tickets)
+    {
+        var accepted = 0;
+        var refused = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var ticket in tickets)
+        {
+            if (ticket.Ok)
+            {
+                accepted++;
+            }
+            else
+            {
+                var code = ticket.Error ?? PushErrors.Unknown;
+                refused[code] = refused.GetValueOrDefault(code) + 1;
+            }
+        }
+
+        return new PushDeliveryResult(accepted, refused);
+    }
 }
 
 /// <summary>
-/// Sends one notification to each of a student's devices, and acts on the tickets: an accepted one
-/// is kept in <c>push_receipts_pending</c> for <see cref="PushReceiptChecker"/>, and a
-/// <c>DeviceNotRegistered</c> one deletes its device at once, unless the device registered again
-/// after the send started (a reinstall can bring the same token back). Logs counts and error codes
-/// only.
+/// Sends notifications to students' devices, and acts on the tickets: an accepted one is kept in
+/// <c>push_receipts_pending</c> for <see cref="PushReceiptChecker"/>, and a <c>DeviceNotRegistered</c> one deletes
+/// its device at once, unless the device registered again after the send started (a reinstall can bring the same
+/// token back). Logs counts and error codes only.
 /// </summary>
 public sealed partial class PushDelivery(CampusPulseDbContext db, IPushSender sender, TimeProvider time,
     ILogger<PushDelivery> logger)
 {
+    /// <summary>The push service couldn't be used at all (unreachable, or an answer it couldn't read), as opposed
+    /// to refusing a message: sending again later may work.</summary>
+    public static bool IsServiceFailure(string? errorCode) =>
+        errorCode is PushErrors.RequestFailed or PushErrors.MalformedResponse;
+
+    /// <summary>The same notification to each of <paramref name="devices"/>.</summary>
     public async Task<PushDeliveryResult> SendAsync(IReadOnlyList<PushDevice> devices, string title, string body,
+        CancellationToken cancellationToken) =>
+        PushDeliveryResult.Of(await SendEachAsync([.. devices.Select(d => (d, new PushMessage(d.Token, title, body)))], cancellationToken));
+
+    /// <summary>Each message to its device (the message's <c>To</c> is that device's token), in batches as the push
+    /// service takes them. Returns one ticket per message, in the same order.</summary>
+    public async Task<IReadOnlyList<PushTicket>> SendEachAsync(IReadOnlyList<(PushDevice Device, PushMessage Message)> messages,
         CancellationToken cancellationToken)
     {
-        if (devices.Count == 0)
+        if (messages.Count == 0)
         {
-            return new PushDeliveryResult(0, new Dictionary<string, int>());
+            return [];
         }
 
         // A ticket or receipt speaks for the token as it was when the message left: the moment a later
         // registration is compared with.
         var sentAt = time.GetUtcNow();
-        var tickets = await sender.SendAsync(devices.Select(d => new PushMessage(d.Token, title, body)).ToList(), cancellationToken);
+        var tickets = await sender.SendAsync([.. messages.Select(m => m.Message)], cancellationToken);
         var accepted = new List<(Guid DeviceId, string TicketId)>();
-        var refused = new Dictionary<string, int>(StringComparer.Ordinal);
         var unregistered = new List<Guid>();
-        foreach (var (device, ticket) in devices.Zip(tickets))
+        foreach (var ((device, _), ticket) in messages.Zip(tickets))
         {
             if (ticket.Ok)
             {
                 accepted.Add((device.Id, ticket.Id!));
-                continue;
             }
-
-            var code = ticket.Error ?? PushErrors.Unknown;
-            refused[code] = refused.GetValueOrDefault(code) + 1;
-            if (code == PushErrors.DeviceNotRegistered)
+            else if (ticket.Error == PushErrors.DeviceNotRegistered && !unregistered.Contains(device.Id))
             {
                 unregistered.Add(device.Id);
             }
@@ -62,13 +87,14 @@ public sealed partial class PushDelivery(CampusPulseDbContext db, IPushSender se
                 .Where(d => unregistered.Contains(d.Id) && d.LastRegisteredAt < sentAt)
                 .ExecuteDeleteAsync(cancellationToken);
 
-        LogSent(logger, devices.Count, accepted.Count, removed);
-        foreach (var (code, count) in refused)
+        var result = PushDeliveryResult.Of(tickets);
+        LogSent(logger, messages.Count, result.Accepted, removed);
+        foreach (var (code, count) in result.Refused)
         {
             LogRefused(logger, code, count);
         }
 
-        return new PushDeliveryResult(accepted.Count, refused);
+        return tickets;
     }
 
     /// <summary>Stores the accepted tickets. A device deleted while its message was on the way
@@ -111,10 +137,10 @@ public sealed partial class PushDelivery(CampusPulseDbContext db, IPushSender se
     }
 
     [LoggerMessage(EventId = 40, Level = LogLevel.Information,
-        Message = "Push sent to {Devices} devices: {Accepted} accepted, {Unregistered} unregistered devices removed")]
-    private static partial void LogSent(ILogger logger, int devices, int accepted, int unregistered);
+        Message = "Push sent: {Messages} messages, {Accepted} accepted, {Unregistered} unregistered devices removed")]
+    private static partial void LogSent(ILogger logger, int messages, int accepted, int unregistered);
 
-    [LoggerMessage(EventId = 41, Level = LogLevel.Warning, Message = "Push refused for {Count} devices: {ErrorCode}")]
+    [LoggerMessage(EventId = 41, Level = LogLevel.Warning, Message = "Push refused for {Count} messages: {ErrorCode}")]
     private static partial void LogRefused(ILogger logger, string errorCode, int count);
 
     [LoggerMessage(EventId = 42, Level = LogLevel.Warning,

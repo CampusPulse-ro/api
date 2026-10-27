@@ -34,6 +34,7 @@ Environment variables only:
 | `Auth__ClientId` | the app registration's client id (one registration for web, mobile and the API) |
 | `HTTPS_PROXY`, `NO_PROXY` | on the Pi, the egress proxy the API reaches Microsoft and Expo through (see Sign-in, Push notifications) |
 | `Push__Expo__AccessToken` | optional: an Expo access token, sent as `Authorization: Bearer` to Expo's push API. Needed only once "enhanced security for push notifications" is turned on for the Expo project |
+| `Reminders__Enabled` | `false` stops sending class reminders (see [Class reminders](#class-reminders)); default `true`. The tests turn it off |
 
 ## Sign-in
 
@@ -193,6 +194,8 @@ clients follow `main`.
     so that clears the pick, not the choice.
   - `student_settings.study_group_id` is `SET NULL` and `student_subjects.subject_id` is `CASCADE`. Those
     only matter if a group or subject row is ever deleted by hand.
+- Class reminders (see [Class reminders](#class-reminders)): `reminder_settings` (a student's lead; no row = off)
+  and `class_reminders_sent` (the reminders that went out, kept 2 days), both in the cascade tree under `users`.
 - `account_deletion_counts`: the number of accounts deleted per UTC day, added to in the same
   transaction as the delete. It holds no identifier. The deletion's log line (`Account deleted`)
   names no one either, but like every line of the request it carries the request's scope: request
@@ -264,6 +267,52 @@ default. So on the Pi it goes through the egress proxy, whose allow list has `ex
 Firebase Cloud Messaging, so an FCM V1 service account key has to be uploaded to EAS for the app's
 Android credentials (`eas credentials`). Sebastian does that. Until then Expo can't deliver to
 Android: expect an `InvalidCredentials` error on the ticket or on its receipt, in the logs.
+
+### Class reminders
+
+A push notification before each of a student's classes (CampusPulse-ro/api#53), at the lead they pick. Both
+endpoints need sign-in and an account (404 like `GET /me` otherwise).
+
+- `GET /me/reminders` → `{ minutesBefore }`: the lead in minutes, or `null` when reminders are off (the default).
+- `PUT /me/reminders` `{ minutesBefore }`: `5`, `10`, `15`, `30` or `60`, or `null` to turn them off; answers the
+  same body. **400** ProblemDetails for any other value, a missing field or a non-number.
+
+**What is sent:** one notification per class, to each of the student's devices.
+- Title `MSA in 15 min`: the subject's short name (else its name) and the minutes left, which is the lead unless
+  the reminder went out late.
+- Body `Lab · 303CP`: the kinds and the room, whichever there are (the subject's name when neither).
+- Data `{ type: "classReminder", date: "2030-11-25", startsAt: "08:00:00", subjectId }`: the date and start as
+  `GET /me/timetable` writes them, so the app can open that class.
+- High priority, since Android may hold a normal one back on a sleeping phone, and a time to live of the
+  minutes until the class starts, so a phone that comes online later gets no reminder for a class that began.
+- The text is English: the API doesn't know the app's language.
+
+**When:** `ClassReminderSender` ticks once a minute. For every student with a lead and at least one device it
+takes their classes, computed exactly as `GET /me/timetable` computes them (`ClassSchedule`, so nothing on a
+non-teaching day or in a break), and sends a reminder for each class whose start (Romanian time) minus the lead
+falls since the previous tick. A class that has already started gets none. The first tick after a start looks
+back an hour (the longest lead), so after a restart or a deploy whatever is still before its class goes out,
+late, with the minutes actually left.
+
+**Never twice:** each reminder is recorded in `class_reminders_sent` (student, date, start, subject) just before
+it goes out, so no tick or restart sends it again.
+- Changing the lead after a class's reminder went out sends no second one for that class.
+- A grid class and a picked offer of the same subject at the same time are one reminder.
+- If the push service couldn't take it at all (unreachable, or an answer that can't be read), the record is
+  dropped and the next tick tries again while the class hasn't started. A crash between the record and the send
+  loses that reminder rather than sending it twice.
+- Records are deleted after 2 days, and with the account.
+
+Tickets, `DeviceNotRegistered` and receipts are handled as for any other send (above). A tick is two statements
+when nobody has reminders on, and a handful of small queries otherwise, however many students.
+
+**Logs:** one Information line per tick that had reminders due (`Class reminders: 3 due, 3 sent, 0 already
+sent, 0 to retry`), counts only, plus the push lines above. With `Reminders__Enabled=false`, one line at startup
+says reminders are off.
+
+**What the clients do:** show a picker (off, 5, 10, 15, 30, 60 minutes) filled from `GET /me/reminders`, and save
+it with `PUT /me/reminders`. Open the class when a notification with `data.type == "classReminder"` is tapped.
+Reminders reach only registered devices (`POST /me/devices`).
 
 ## Timetable
 

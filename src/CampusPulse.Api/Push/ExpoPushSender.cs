@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using CampusPulse.Domain.Push;
 
 namespace CampusPulse.Api.Push;
@@ -32,7 +33,8 @@ public sealed partial class ExpoPushSender(HttpClient client, ILogger<ExpoPushSe
 
     private async Task<IEnumerable<PushTicket>> SendBatchAsync(PushMessage[] batch, CancellationToken cancellationToken)
     {
-        var body = batch.Select(m => new ExpoMessage(m.To, m.Title, m.Body, "default")).ToArray();
+        var body = batch.Select(m => new ExpoMessage(m.To, m.Title, m.Body, "default", m.Data, m.HighPriority ? "high" : null,
+            m.TimeToLive is { } ttl ? Math.Max(1, (int)Math.Ceiling(ttl.TotalSeconds)) : null)).ToArray();
         ExpoResponse<List<ExpoTicket>>? response;
         try
         {
@@ -161,7 +163,16 @@ public sealed partial class ExpoPushSender(HttpClient client, ILogger<ExpoPushSe
     [LoggerMessage(EventId = 31, Level = LogLevel.Warning, Message = "Expo push {Operation} unreachable: {Reason}")]
     private static partial void LogUnreachable(ILogger logger, string operation, string reason);
 
-    private sealed record ExpoMessage(string To, string Title, string Body, string Sound);
+    /// <summary>One message as Expo reads it. The optional fields are left out when not set: Expo then applies each
+    /// platform's default (normal priority on Android, four weeks to live).</summary>
+    private sealed record ExpoMessage(
+        string To,
+        string Title,
+        string Body,
+        string Sound,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyDictionary<string, string>? Data,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Priority,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? Ttl);
 
     private sealed record ExpoResponse<T>(T? Data, List<ExpoError?>? Errors);
 

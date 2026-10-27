@@ -1,4 +1,5 @@
 using CampusPulse.Domain.Push;
+using CampusPulse.Domain.Reminders;
 using CampusPulse.Domain.Timetable;
 using CampusPulse.Domain.Users;
 using Microsoft.EntityFrameworkCore;
@@ -38,6 +39,10 @@ public sealed class CampusPulseDbContext(DbContextOptions<CampusPulseDbContext> 
     public DbSet<StudentSettings> StudentSettings => Set<StudentSettings>();
 
     public DbSet<StudentSubject> StudentSubjects => Set<StudentSubject>();
+
+    public DbSet<ReminderSettings> ReminderSettings => Set<ReminderSettings>();
+
+    public DbSet<SentClassReminder> SentClassReminders => Set<SentClassReminder>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -89,6 +94,29 @@ public sealed class CampusPulseDbContext(DbContextOptions<CampusPulseDbContext> 
         });
 
         OnTimetableCreating(modelBuilder);
+        OnRemindersCreating(modelBuilder);
+    }
+
+    /// <summary>Class reminders (CampusPulse-ro/api#53): the student's lead, and the reminders already sent
+    /// (so none goes out twice). Both are the student's, deleted with the account.</summary>
+    private static void OnRemindersCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<ReminderSettings>(settings =>
+        {
+            settings.ToTable("reminder_settings");
+            settings.HasKey(s => s.UserId);
+            settings.HasOne<User>().WithOne().HasForeignKey<ReminderSettings>(s => s.UserId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<SentClassReminder>(sent =>
+        {
+            sent.ToTable("class_reminders_sent");
+            sent.HasKey(s => new { s.UserId, s.Date, s.StartsAt, s.SubjectId });
+            sent.HasOne<User>().WithMany().HasForeignKey(s => s.UserId).OnDelete(DeleteBehavior.Cascade);
+            // No key to subjects: a row only has to outlive the class by a little, and the sender deletes it
+            // after two days by this index.
+            sent.HasIndex(s => s.SentAt);
+        });
     }
 
     /// <summary>

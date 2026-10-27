@@ -44,6 +44,29 @@ public sealed class ExpoPushSenderTests
         Assert.Equal("default", first.GetProperty("sound").GetString());
     }
 
+    /// <summary>Data, priority and time to live go out only when set; otherwise Expo applies each platform's default.</summary>
+    [Fact]
+    public async Task Data_priority_and_time_to_live_are_sent_only_when_set()
+    {
+        var (sender, expo) = Create();
+        var plain = new PushMessage(PushTesting.NewToken(), "T", "B");
+        var reminder = new PushMessage(PushTesting.NewToken(), "T", "B")
+        {
+            Data = new Dictionary<string, string> { ["type"] = "classReminder", ["date"] = "2030-11-25" },
+            HighPriority = true,
+            TimeToLive = TimeSpan.FromSeconds(869.2),
+        };
+
+        await sender.SendAsync([plain, reminder], default);
+
+        var (first, second) = (expo.Sends[0].Body[0], expo.Sends[0].Body[1]);
+        Assert.Equal(["to", "title", "body", "sound"], first.EnumerateObject().Select(p => p.Name));
+        Assert.Equal("classReminder", second.GetProperty("data").GetProperty("type").GetString());
+        Assert.Equal("2030-11-25", second.GetProperty("data").GetProperty("date").GetString());
+        Assert.Equal("high", second.GetProperty("priority").GetString());
+        Assert.Equal(870, second.GetProperty("ttl").GetInt32());
+    }
+
     [Fact]
     public async Task An_error_ticket_keeps_only_expos_code()
     {
