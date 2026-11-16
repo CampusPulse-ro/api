@@ -43,7 +43,7 @@
     <!-- Writes the OpenAPI document at build time: openapi/v1.json at the repo root is the
          contract the mobile and web clients generate their types from, committed, and CI fails
          when it is stale. -->
-    <PackageReference Include="Microsoft.Extensions.ApiDescription.Server" Version="10.0.14">
+    <PackageReference Include="Microsoft.Extensions.ApiDescription.Server" Version="11.0.0">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
