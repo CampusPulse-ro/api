@@ -2,3 +2,4 @@
 # form "^host:443$" (FilterURLs On: plain-HTTP requests start with http:// and never match).
 ^login\.microsoftonline\.com:443$
 ^exp\.host:443$
+^api\.resend\.com:443$

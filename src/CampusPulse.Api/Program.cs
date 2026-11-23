@@ -2,7 +2,10 @@ using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using CampusPulse.Api;
+using CampusPulse.Api.Accounts;
+using CampusPulse.Api.Accounts.Email;
 using CampusPulse.Api.Auth;
+using CampusPulse.Api.Deadlines;
 using CampusPulse.Api.Http;
 using CampusPulse.Api.Logging;
 using CampusPulse.Api.Metrics;
@@ -70,8 +73,14 @@ builder.Services.AddCampusPulsePush();
 // Class reminders: a push before each class, at the lead the student picked (see ClassReminderSender).
 builder.Services.AddCampusPulseReminders(builder.Configuration);
 
-// Microsoft sign-in (UPT accounts). Unconfigured, it fails closed: see AuthSetup.
-var auth = builder.Services.AddCampusPulseAuth(builder.Configuration);
+// Sign-in: our own tokens (Auth:SigningKey) and, for installed app versions, UPT Entra tokens; each request's bearer
+// goes to the scheme of its issuer. Unconfigured, each fails closed: see AuthSetup.
+var auth = builder.AddCampusPulseAuth();
+
+// The sign-in code emails (Resend; a logging sender in Development), and the hourly cleanup of expired sign-in rows.
+builder.AddCampusPulseEmail();
+builder.Services.AddSingleton<SignInCleanup>();
+builder.Services.AddHostedService(provider => provider.GetRequiredService<SignInCleanup>());
 
 // Behind nginx: the client's address and scheme from nginx's X-Forwarded-* headers, trusted from loopback only.
 builder.Services.AddCampusPulseProxyHeaders();
@@ -107,10 +116,22 @@ builder.Services.AddCors(options => options.AddDefaultPolicy(policy => policy
 
 var app = builder.Build();
 
-if (auth is null && !writingOpenApiDocument)
+if (!writingOpenApiDocument)
 {
-    app.Logger.LogWarning(
-        "Sign-in is NOT configured (Auth__TenantId, Auth__ClientId unset): every endpoint that needs it answers 401.");
+    if (auth.Entra is null)
+    {
+        app.Logger.LogWarning(
+            "UPT sign-in is NOT configured (Auth__TenantId, Auth__ClientId unset): UPT tokens are refused and /auth/microsoft answers 503.");
+    }
+
+    if (!auth.OwnTokens)
+    {
+        app.Logger.LogWarning("Auth__SigningKey is NOT set: no session can be issued, so /auth/* answers 503 and only UPT tokens work.");
+    }
+    else if (auth.OwnTokensEphemeral)
+    {
+        app.Logger.LogWarning("Development: Auth__SigningKey is not set, so access tokens are signed with a key that dies with this process.");
+    }
 }
 
 // Metrics first, on their own loopback port only (see MetricsSetup).
@@ -225,7 +246,9 @@ api.MapGet("/health/ready", async (CampusPulseDbContext db, CancellationToken re
     .Produces<HealthResponse>(StatusCodes.Status200OK)
     .Produces<HealthResponse>(StatusCodes.Status503ServiceUnavailable);
 
+api.MapAuth();
 api.MapMe();
+api.MapDeadlines();
 api.MapPush();
 api.MapTimetable();
 api.MapReminders();

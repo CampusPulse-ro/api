@@ -356,7 +356,7 @@ public static class TimetableEndpoints
     internal static async Task<Results<Ok<IReadOnlyList<StudentSubjectResponse>>, ProblemHttpResult>> GetSubjects(
         ClaimsPrincipal principal, CampusPulseDbContext db, TimetableCache cache, CancellationToken cancellationToken)
     {
-        if (await StudentTimetableChoices.ForOidAsync(db, Oid(principal), cancellationToken) is not { } student)
+        if (await StudentTimetableChoices.ForCallerAsync(db, principal, cancellationToken) is not { } student)
         {
             return MeEndpoint.NoAccount();
         }
@@ -465,7 +465,7 @@ public static class TimetableEndpoints
 
         var (first, last) = range;
 
-        if (await StudentTimetableChoices.ForOidAsync(db, Oid(principal), cancellationToken) is not { } student)
+        if (await StudentTimetableChoices.ForCallerAsync(db, principal, cancellationToken) is not { } student)
         {
             return MeEndpoint.NoAccount();
         }
@@ -504,15 +504,12 @@ public static class TimetableEndpoints
         IReadOnlyList<OccurrenceResponse> occurrences) =>
         new(from, to, timetable.GroupResponse(groupId), occurrences, timetable.Notes(groupId));
 
-    private static string Oid(ClaimsPrincipal principal) => MeEndpoint.Identity.From(principal).Oid;
 
     /// <summary>The signed-in student's id and study group, or null without an account. One query.</summary>
     private static async Task<(Guid UserId, Guid? StudyGroupId)?> StudyGroupOfAsync(CampusPulseDbContext db, ClaimsPrincipal principal,
         CancellationToken cancellationToken)
     {
-        var oid = Oid(principal);
-        var row = await db.Users.AsNoTracking()
-            .Where(u => u.EntraObjectId == oid)
+        var row = await Caller.Users(db, principal).AsNoTracking()
             .Select(u => new { u.Id, StudyGroupId = db.StudentSettings.Where(s => s.UserId == u.Id).Select(s => s.StudyGroupId).FirstOrDefault() })
             .SingleOrDefaultAsync(cancellationToken);
         return row is null ? null : (row.Id, row.StudyGroupId);

@@ -79,12 +79,16 @@ public static class PushEndpoints
                 detail: "token must look like ExponentPushToken[…] (from getExpoPushTokenAsync).");
         }
 
-        var identity = MeEndpoint.Identity.From(principal);
         for (var attempt = 1; ; attempt++)
         {
             try
             {
-                return await RegisterOnceAsync(request, identity, db, time.GetUtcNow(), cancellationToken);
+                if (await Caller.IdAsync(db, principal, cancellationToken) is not { } userId)
+                {
+                    return MeEndpoint.NoAccount();
+                }
+
+                return await RegisterOnceAsync(request, userId, db, time.GetUtcNow(), cancellationToken);
             }
             catch (DbUpdateException e) when (attempt == 1 && (e is DbUpdateConcurrencyException
                 || e.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation }))
@@ -99,7 +103,7 @@ public static class PushEndpoints
     }
 
     private static async Task<Results<Created<DeviceResponse>, Ok<DeviceResponse>, ProblemHttpResult>> RegisterOnceAsync(
-        RegisterDeviceRequest request, MeEndpoint.Identity identity, CampusPulseDbContext db, DateTimeOffset now,
+        RegisterDeviceRequest request, Guid userId, CampusPulseDbContext db, DateTimeOffset now,
         CancellationToken cancellationToken)
     {
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
@@ -107,7 +111,7 @@ public static class PushEndpoints
         // Locks the student's row: their registrations run one at a time (so the cap holds), and a
         // DELETE /me either waits for this one or has already removed the row (then: 404).
         var user = (await db.Users
-            .FromSql($"SELECT * FROM users WHERE entra_object_id = {identity.Oid} FOR UPDATE")
+            .FromSql($"SELECT * FROM users WHERE id = {userId} FOR UPDATE")
             .ToListAsync(cancellationToken)).SingleOrDefault();
         if (user is null)
         {
@@ -150,12 +154,9 @@ public static class PushEndpoints
     internal static async Task<NoContent> UnregisterDevice([FromBody] UnregisterDeviceRequest request,
         ClaimsPrincipal principal, CampusPulseDbContext db, CancellationToken cancellationToken)
     {
-        var identity = MeEndpoint.Identity.From(principal);
-        if (PushDevice.IsExpoToken(request.Token))
+        if (PushDevice.IsExpoToken(request.Token) && await Caller.IdAsync(db, principal, cancellationToken) is { } userId)
         {
-            await db.PushDevices
-                .Where(d => d.Token == request.Token && db.Users.Any(u => u.Id == d.UserId && u.EntraObjectId == identity.Oid))
-                .ExecuteDeleteAsync(cancellationToken);
+            await db.PushDevices.Where(d => d.Token == request.Token && d.UserId == userId).ExecuteDeleteAsync(cancellationToken);
         }
 
         return TypedResults.NoContent();

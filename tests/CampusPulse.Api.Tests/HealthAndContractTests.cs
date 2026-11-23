@@ -48,7 +48,7 @@ public sealed class HealthAndContractTests(CampusPulseAppFactory factory)
         var cached = operations.Where(op => op.Responses.TryGetProperty("304", out _)).Select(op => $"{op.Method} {op.Path}").Order(StringComparer.Ordinal);
         Assert.Equal(
             [
-                "get /me", "get /me/reminders", "get /me/settings", "get /me/subjects", "get /me/timetable", "get /rooms",
+                "get /me", "get /me/deadlines", "get /me/reminders", "get /me/settings", "get /me/subjects", "get /me/timetable", "get /rooms",
                 "get /rooms/{code}/timetable", "get /semesters/current", "get /timetable/groups/{id}", "get /timetable/groups/{id}/choices",
                 "get /timetable/programmes",
             ], cached);

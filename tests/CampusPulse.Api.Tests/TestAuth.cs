@@ -21,13 +21,22 @@ public static class TestAuth
 
     public static readonly RsaSecurityKey Key = new(RSA.Create(2048)) { KeyId = "test-key" };
 
+    /// <summary>The key our own access tokens are signed with in the tests (<c>Auth:SigningKey</c>).</summary>
+    public static readonly byte[] SigningKey = SHA256.HashData("campuspulse test signing key"u8.ToArray());
+
+    /// <summary>The default of <see cref="Token"/>'s <c>email</c>: an address of the token's own oid, as every UPT
+    /// account has its own.</summary>
+    public const string EmailOfOid = "<oid>@student.upt.ro";
+
     public static string Issuer(string tenant = TenantId) => $"https://login.microsoftonline.com/{tenant}/v2.0";
 
-    /// <summary>Configures sign-in for <see cref="TenantId"/> / <see cref="ClientId"/> and trusts <see cref="Key"/>.</summary>
+    /// <summary>Configures sign-in for <see cref="TenantId"/> / <see cref="ClientId"/>, trusts <see cref="Key"/>, and
+    /// signs our own tokens with <see cref="SigningKey"/>.</summary>
     public static void Configure(IWebHostBuilder builder)
     {
         builder.UseSetting("Auth:TenantId", TenantId);
         builder.UseSetting("Auth:ClientId", ClientId);
+        builder.UseSetting("Auth:SigningKey", Convert.ToBase64String(SigningKey));
         builder.ConfigureTestServices(services =>
             services.PostConfigure<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme, options =>
             {
@@ -53,7 +62,7 @@ public static class TestAuth
         bool expired = false,
         SecurityKey? signWith = null,
         string algorithm = SecurityAlgorithms.RsaSha256,
-        string? email = "ana@student.upt.ro",
+        string? email = EmailOfOid,
         string? name = "Ana Pop",
         IReadOnlyDictionary<string, object>? extra = null)
     {
@@ -76,7 +85,7 @@ public static class TestAuth
         Add("azp", azp);
         Add("idp", idp);
         Add("roles", roles);
-        Add("preferred_username", email);
+        Add("preferred_username", email == EmailOfOid ? $"{oid ?? "nobody"}@student.upt.ro" : email);
         Add("name", name);
         foreach (var (type, value) in extra ?? new Dictionary<string, object>())
         {
@@ -94,5 +103,23 @@ public static class TestAuth
             SigningCredentials = new SigningCredentials(signWith ?? Key, algorithm),
         };
         return new JsonWebTokenHandler().CreateToken(descriptor);
+    }
+
+    /// <summary>One of our own access tokens for account <paramref name="userId"/>, as the API signs them; each argument
+    /// bends one part.</summary>
+    public static string OwnToken(Guid userId, string method = "email", bool expired = false, byte[]? key = null,
+        string issuer = "campuspulse", string audience = "campuspulse-api", string? subject = null)
+    {
+        var now = DateTime.UtcNow;
+        return new JsonWebTokenHandler().CreateToken(new SecurityTokenDescriptor
+        {
+            Issuer = issuer,
+            Audience = audience,
+            Claims = new Dictionary<string, object> { ["sub"] = subject ?? userId.ToString(), ["amr"] = new[] { method } },
+            IssuedAt = expired ? now.AddHours(-2) : now.AddMinutes(-1),
+            NotBefore = expired ? now.AddHours(-2) : now.AddMinutes(-1),
+            Expires = expired ? now.AddMinutes(-10) : now.AddMinutes(15),
+            SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(key ?? SigningKey), SecurityAlgorithms.HmacSha256),
+        });
     }
 }

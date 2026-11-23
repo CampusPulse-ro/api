@@ -237,7 +237,7 @@ public sealed class DeleteMeTests(PostgresAppFactory factory) : IClassFixture<Po
         var line = Assert.Single(logs.Entries, e => e.Category == MeEndpoint.LogCategory);
         Assert.Equal(LogLevel.Information, line.Level);
         Assert.Equal("Account deleted", line.Message);
-        var identifiers = new[] { oid, me.Id.ToString(), me.Email };
+        var identifiers = new[] { oid, me.Id.ToString(), me.Email! };
         Assert.DoesNotContain(logs.Entries, e => identifiers.Any(id =>
             e.Message.Contains(id, StringComparison.OrdinalIgnoreCase)
             || e.ScopeValues.Any(kv => kv.Value?.ToString()?.Contains(id, StringComparison.OrdinalIgnoreCase) == true)));
@@ -297,7 +297,7 @@ public sealed class DeleteMeTests(PostgresAppFactory factory) : IClassFixture<Po
             {
                 Collisions++;
                 await using var other = factory.CreateDbContext();
-                other.Users.Add(new User(oid, "rival@student.upt.ro", "Rival", DateTimeOffset.UtcNow));
+                other.Users.Add(User.FromUpt(oid, "rival@student.upt.ro", "Rival", DateTimeOffset.UtcNow));
                 await other.SaveChangesAsync(cancellationToken);
             }
 
@@ -332,6 +332,6 @@ public sealed class DeleteMeTests(PostgresAppFactory factory) : IClassFixture<Po
         await using var db = factory.CreateDbContext();
         var stored = await db.Users.SingleAsync(u => u.EntraObjectId == oid);
         Assert.Equal(me.Id, stored.Id);
-        Assert.Equal("ana@student.upt.ro", stored.Email);
+        Assert.Equal($"{oid}@student.upt.ro", stored.Email);
     }
 }
