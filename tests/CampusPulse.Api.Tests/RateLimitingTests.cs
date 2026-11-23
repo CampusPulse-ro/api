@@ -13,9 +13,9 @@ using Microsoft.Extensions.Options;
 namespace CampusPulse.Api.Tests;
 
 /// <summary>
-/// The per-client rate limits, with small buckets so a test can empty one. Requests go to <c>/health</c>, which needs
-/// no database: with a token it still counts as the student's (authentication runs for every request), and a POST to it
-/// is a write (answered 405, until the write bucket is empty). The client's address is set on the connection, as
+/// The per-client rate limits, with small buckets so a test can empty one. Requests go to <c>/</c>, which needs no
+/// database: with a token it still counts as the student's (authentication runs for every request), and a POST to it is
+/// a write (answered 405, until the write bucket is empty). The client's address is set on the connection, as
 /// Kestrel would, with nginx's <c>X-Forwarded-For</c> where the request comes through the proxy.
 /// </summary>
 public sealed class RateLimitingTests
@@ -49,7 +49,7 @@ public sealed class RateLimitingTests
     /// <summary>A request as Kestrel hands it over: from <paramref name="connection"/>, with nginx's
     /// <c>X-Forwarded-For</c> when <paramref name="forwardedFor"/> is given.</summary>
     private static Task<HttpContext> Send(WebApplicationFactory<Program> factory, IPAddress connection, string? forwardedFor = null,
-        string? oid = null, string method = "GET", string path = "/health", string? origin = null, string? token = null) =>
+        string? oid = null, string method = "GET", string path = "/", string? origin = null, string? token = null) =>
         factory.Server.SendAsync(context =>
         {
             context.Request.Method = method;
@@ -211,6 +211,33 @@ public sealed class RateLimitingTests
         Assert.Equal("Rate limits refused 3 requests in the last minute (1 signed in, 2 anonymous)", line.Message);
     }
 
+    /// <summary>Liveness is never refused: answering it costs less than refusing it, and a status check must not report
+    /// an outage that isn't one.</summary>
+    [Fact]
+    public async Task The_liveness_check_is_never_refused()
+    {
+        using var factory = With(("Anonymous:Burst", "1"), ("Anonymous:PerMinute", "1"));
+
+        var health = await Statuses(5, () => Send(factory, Nginx, "203.0.113.7", path: "/health"));
+        var other = await Statuses(2, () => Send(factory, Nginx, "203.0.113.7"));
+
+        Assert.All(health, status => Assert.Equal(200, status));
+        Assert.Equal([200, 429], other);
+    }
+
+    /// <summary>The write bucket comes first, so a refused write takes nothing from the client's general bucket.</summary>
+    [Fact]
+    public async Task A_refused_write_costs_no_read()
+    {
+        using var factory = With(("Writes:Burst", "1"), ("Writes:PerMinute", "1"), ("SignedIn:Burst", "3"), ("SignedIn:PerMinute", "1"));
+
+        var writes = await Statuses(5, () => Send(factory, Nginx, "203.0.113.7", oid: "oid-ana", method: "POST"));
+        var reads = await Statuses(2, () => Send(factory, Nginx, "203.0.113.7", oid: "oid-ana"));
+
+        Assert.Equal([405, 429, 429, 429, 429], writes);
+        Assert.Equal([200, 200], reads);
+    }
+
     [Fact]
     public async Task Turned_off_nothing_is_refused()
     {
@@ -228,7 +255,7 @@ public sealed class RateLimitingTests
 
         Assert.True(limits.Enabled);
         Assert.Equal((100, 100), (limits.SignedIn.Burst, limits.SignedIn.PerMinute));
-        Assert.Equal((100, 100), (limits.Anonymous.Burst, limits.Anonymous.PerMinute));
+        Assert.Equal((300, 300), (limits.Anonymous.Burst, limits.Anonymous.PerMinute));
         Assert.Equal((30, 30), (limits.Writes.Burst, limits.Writes.PerMinute));
         Assert.Equal((10, 1), (limits.Account.Burst, limits.Account.PerMinute));
     }

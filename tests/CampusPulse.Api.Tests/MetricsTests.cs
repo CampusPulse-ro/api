@@ -59,14 +59,14 @@ public sealed class MetricsTests
             ["RateLimits:Anonymous:Burst"] = "1",
             ["RateLimits:Anonymous:PerMinute"] = "1",
         });
-        Assert.Equal(StatusCodes.Status200OK, (await Get(factory, "/health", ApiPort, IPAddress.Loopback)).Status);
-        Assert.Equal(StatusCodes.Status429TooManyRequests, (await Get(factory, "/health", ApiPort, IPAddress.Loopback)).Status);
+        Assert.Equal(StatusCodes.Status200OK, (await Get(factory, "/", ApiPort, IPAddress.Loopback)).Status);
+        Assert.Equal(StatusCodes.Status429TooManyRequests, (await Get(factory, "/", ApiPort, IPAddress.Loopback)).Status);
 
         var (status, body) = await Get(factory, "/metrics", MetricsPort, IPAddress.Loopback);
 
         Assert.Equal(StatusCodes.Status200OK, status);
         Assert.Contains("http_server_request_duration_seconds_bucket{", body);
-        Assert.Contains("http_route=\"/health\"", body);
+        Assert.Contains("http_route=\"/\"", body);
         Assert.Contains("http_response_status_code=\"429\"", body);
         Assert.Contains("aspnetcore_rate_limiting_requests_total{", body);
         Assert.Contains("aspnetcore_rate_limiting_result=\"global_limiter\"", body);
@@ -101,6 +101,18 @@ public sealed class MetricsTests
 
         Assert.NotEqual(StatusCodes.Status200OK, status);
         Assert.DoesNotContain("http_server_request_duration", body);
+    }
+
+    /// <summary>On a port the API already serves, every request there would be a 404 and /metrics reachable through
+    /// nginx: the start fails instead.</summary>
+    [Fact]
+    public void A_metrics_port_the_API_already_listens_on_fails_the_start()
+    {
+        using var factory = new Factory(ApiPort, new() { [WebHostDefaults.ServerUrlsKey] = $"http://127.0.0.1:{ApiPort}" });
+
+        var error = Assert.ThrowsAny<Exception>(() => factory.CreateClient());
+
+        Assert.Contains($"Metrics__Port ({ApiPort}) is a port the API already listens on", error.ToString());
     }
 
     private static int FreePort()

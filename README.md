@@ -36,12 +36,12 @@ Environment variables only:
 | `Push__Expo__AccessToken` | optional: an Expo access token, sent as `Authorization: Bearer` to Expo's push API. Needed only once "enhanced security for push notifications" is turned on for the Expo project |
 | `Reminders__Enabled` | `false` stops sending class reminders (see [Class reminders](#class-reminders)); default `true`. The tests turn it off |
 | `RateLimits__Enabled` | `false` turns the rate limits off (load tests, an emergency); default `true`. See [Rate limits](#rate-limits) |
-| `RateLimits__<bucket>__Burst`, `RateLimits__<bucket>__PerMinute` | the token buckets: `SignedIn` (per student) and `Anonymous` (per client IP) 100 / 100, `Writes` 30 / 30, `Account` (`POST`/`DELETE /me`) 10 / 1. A value below 1 fails the start |
+| `RateLimits__<bucket>__Burst`, `RateLimits__<bucket>__PerMinute` | the token buckets: `SignedIn` (per student) 100 / 100, `Anonymous` (per client IP) 300 / 300, `Writes` 30 / 30, `Account` (`POST`/`DELETE /me`) 10 / 1. A value below 1 fails the start |
 | `TimetableCache__VersionCheckSeconds` | how often, at most, the cached timetable asks the database whether an import ran; default `10` (see [Timetable cache](#timetable-cache)) |
 | `Limits__MaxRequestBodyBytes` | the largest request body Kestrel takes; default `16384` (16 KiB). Larger is a 413 ProblemDetails |
 | `Limits__RequestTimeoutSeconds` | a request running longer is cancelled and answered 504 ProblemDetails; default `30` |
 | `Database__MaxPoolSize`, `Database__MinPoolSize` | the Npgsql connection pool of one process. Set, they win over the connection string; unset, a size in the connection string is kept, else `20` and `0` |
-| `Metrics__Port` | serve [metrics](#metrics) on `127.0.0.1:<port>`. Unset (the default): no metrics |
+| `Metrics__Port` | serve [metrics](#metrics) on `127.0.0.1:<port>`. Unset (the default): no metrics. A port the API already listens on fails the start |
 
 ## Sign-in
 
@@ -170,7 +170,8 @@ clients follow `main`.
   by name, never as a number. A body that can't be read is a **400** ProblemDetails (an empty 400 gets
   one from `UseStatusCodePages`), in every environment.
 - Declare every response (`.Produces<T>()`, `.Produces<T>(503)`) so clients get a type for it. Two are added for
-  you: a **429** ProblemDetails on every operation (the rate limits, mapped through the group in `Program.cs`), and a
+  you: a **429** ProblemDetails on every operation but `GET /health` (the rate limits; endpoints mapped through the
+  `api` group in `Program.cs` get it), and a
   **304** on the GETs that opt into conditional requests (`.WithHttpCaching(...)`, see [HTTP caching](#http-caching)).
 
 ## Data
@@ -450,14 +451,19 @@ ASP.NET Core's rate limiter with token buckets in memory (`RateLimitSetup`). A b
 | Bucket | Counted per | Burst / per minute | Takes from |
 |---|---|---|---|
 | `SignedIn` | student (the token's `oid`) | 100 / 100 | every request with a valid token |
-| `Anonymous` | client IP (an IPv6 address by its /64) | 100 / 100 | every request without one: health checks, the contract, refused tokens |
-| `Writes` | student, else IP | 30 / 30 | every POST, PUT, PATCH, DELETE, as well |
+| `Anonymous` | client IP (an IPv6 address by its /64) | 300 / 300 | every request without one: readiness checks, the contract, refused tokens |
+| `Writes` | student, else IP | 30 / 30 | every POST, PUT, PATCH, DELETE, first |
 | `Account` | student | 10 / 1 | `POST /me` and `DELETE /me`, as well |
 
 - A refused request is a **429** ProblemDetails with `Retry-After` (seconds), which browsers can read (CORS exposes it).
   Clients wait that long before retrying.
 - An invalid token counts as anonymous, so made-up `oid`s can't open buckets of their own. Writes are limited by
-  method, so a new endpoint is covered without anyone remembering to.
+  method, so a new endpoint is covered without anyone remembering to, and checked first, so a refused write costs no
+  read.
+- `Anonymous` is larger because a campus or dorm network puts many students behind one address, and an expired
+  token's 401 should reach the app (it signs the student out) rather than a 429.
+- `GET /health` is exempt: answering it costs less than refusing it, and the web's status line must never show an
+  outage that isn't one. `/health/ready` (it touches the database) is limited like any anonymous call.
 - Logged as counts only, once a minute when there were any: `Rate limits refused 37 requests in the last minute (30
   signed in, 7 anonymous)`. Per route and per bucket they are in the [metrics](#metrics).
 - The test notification keeps its own once-a-minute limit (see [Push notifications](#push-notifications)).
@@ -476,12 +482,15 @@ classes. A request only turns weeks into dates.
   asks for the id at most every `TimetableCache__VersionCheckSeconds` (10 s; one indexed query) and loads the snapshot
   again when it changed: nine queries in one REPEATABLE READ transaction, so the data and its label come from the same
   database snapshot.
-- After an import every instance serves it within 10 s. A read that looks for something the snapshot lacks (a new
-  group's id from a client, the group a student just picked) makes the cache check sooner, at most once a second, so
-  new data is found within a second and made-up ids can't make every request query the database. Changed data can
-  be up to 10 s old.
-- One check or load runs at a time: requests that arrive meanwhile wait for it and reuse its result instead of each
-  querying the database (no stampede).
+- After an import every instance serves it within 10 s. A read that looks for something the snapshot lacks makes the
+  cache check sooner: at once for ids from the database (the group a student has, or just picked and the database
+  confirmed), at most once a second for ids a client sent, so made-up ids can't make every request query the
+  database. Changed data can be up to 10 s old.
+- **One check at a time, and readers don't wait for it:** once a snapshot is in memory, only the request that starts a
+  check waits for it (one small query); every other request is answered from memory meanwhile, so a slow database
+  never stalls timetable reads. With nothing loaded yet, requests wait for the one load (no stampede).
+- The check runs on the cache's own token with a 15 s timeout, so a client that goes away doesn't cancel it for the
+  others.
 - **Database down:** a check that can't reach the database keeps serving the snapshot in memory (one Warning) and
   tries again an interval later, so timetable reads keep working. With nothing loaded yet, a failed load fails the
   next second's requests at once instead of each trying again in turn.
@@ -494,10 +503,15 @@ classes. A request only turns weeks into dates.
 
 - Every timetable and `/me` GET answers a weak `ETag` (a hash of its JSON) and **304 Not Modified**, with no body, to a
   matching `If-None-Match` (`HttpCaching`).
-- Shared data (`/semesters/current`, `/timetable/…`, `/rooms…`): `Cache-Control: private, max-age=60`. It is the same
-  for everyone but needs sign-in, so it is never `public`: no shared cache (a CDN, a proxy) may keep it.
-- A student's own data (`/me…`): `private, no-cache`, so the browser asks every time (and gets a 304 when nothing
-  changed) and never shows a change late.
+- Shared data not tied to today (a group's timetable for given dates, the choices, `/rooms`, a room on a given date):
+  `Cache-Control: private, max-age=60`. It is the same for everyone but needs sign-in, so it is never `public`: no
+  shared cache (a CDN, a proxy) may keep it.
+- Shared data that depends on today's date (`/semesters/current`, `/timetable/programmes`, a timetable without dates):
+  `private, no-cache`, so the browser asks each time (a 304 when nothing changed) and never shows yesterday after
+  midnight.
+- A student's own data (`/me…`): `private, no-store`, so a browser never writes it to its disk cache (a shared lab PC
+  keeps nothing after sign-out). It still carries its `ETag`: a client that keeps its own copy can send
+  `If-None-Match` and get a 304.
 - Everything else (writes, errors, health): `no-store`.
 
 ### Compression
@@ -568,6 +582,7 @@ signing key), rate limits off for throughput, logging at Warning. `oha`, 16 conn
   days 29.6 KB → 2.2 KB, `/rooms` 4.8 KB → 0.5 KB.
 - **Limits** (defaults): one student calling `/me/timetable` as fast as 4 connections allow for 10 s got 115 answers
   (the burst of 100 plus the refill) and 74,571 429s; refusing costs no database work (p95 0.6 ms).
+- Measured on the first version of this change; the review fixes after it don't touch the path of a cached read.
 - `/health` is ~0.1 ms slower per request: the new middleware (forwarded headers, security headers, compression).
 
 ## Tests

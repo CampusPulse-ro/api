@@ -23,30 +23,40 @@ public sealed class TimetableCacheOptions
 /// the newest import run's id and asks the database for that id at most every
 /// <see cref="TimetableCacheOptions.VersionCheckSeconds"/>: a different one means an import ran, and the snapshot is
 /// loaded again.
-/// <para>A read that looks for something the snapshot doesn't have (a group or room id a client got from a newer
-/// snapshot, the group a student just picked) makes the cache ask sooner
-/// (<see cref="GetAsync(Func{TimetableSnapshot, bool}, CancellationToken)"/>), at most once per
-/// <see cref="MissCheckInterval"/>, so new data is found within a second while made-up ids can't make every request
-/// query the database. Changed data can be up to the check interval old.</para>
-/// <para>One check or load runs at a time: requests that arrive meanwhile wait and reuse its result (no stampede after
-/// an import). If the database can't be asked, the snapshot in memory is served for another interval (with a
-/// warning) instead of every waiting request trying in turn; with no snapshot yet, a failed load fails the requests of
-/// the next <see cref="MissCheckInterval"/> at once. Per-student data is never cached.</para>
+/// <list type="bullet">
+/// <item>One check runs at a time (single flight). Once a snapshot is in memory, only the request that starts a check
+/// waits for it (one small query); every other request is answered from memory meanwhile, so a slow database never
+/// stalls timetable reads. With nothing loaded yet, requests wait for the one load.</item>
+/// <item>A read that looks for something the snapshot doesn't have makes the cache check sooner
+/// (<see cref="GetAsync(Func{TimetableSnapshot, bool}, bool, CancellationToken)"/>): at once for ids that come from
+/// the database (the group a student has or just picked), at most once per <see cref="MissCheckInterval"/> for ids a
+/// client sent, so made-up ids can't make every request query the database. New data is found within a second;
+/// changed data can be up to the check interval old.</item>
+/// <item>The check runs on the cache's own token with a timeout (<see cref="CheckTimeout"/>), not a request's, so a
+/// client that goes away doesn't cancel it for the others. If the database can't be asked, the snapshot in memory is
+/// served for another interval (with a warning); with nothing loaded yet, a failed load fails the requests of the next
+/// <see cref="MissCheckInterval"/> at once.</item>
+/// </list>
+/// Per-student data is never cached.
 /// </summary>
 public sealed partial class TimetableCache(IServiceScopeFactory scopes, TimeProvider time, IOptions<TimetableCacheOptions> options,
-    CampusPulseMetrics metrics, ILogger<TimetableCache> logger) : IDisposable
+    IHostApplicationLifetime lifetime, CampusPulseMetrics metrics, ILogger<TimetableCache> logger)
 {
-    /// <summary>How often, at most, a lookup that misses makes the cache ask the database.</summary>
+    /// <summary>How often, at most, a lookup of an id a client sent that the snapshot lacks makes the cache ask.</summary>
     public static readonly TimeSpan MissCheckInterval = TimeSpan.FromSeconds(1);
 
-    private readonly SemaphoreSlim _gate = new(1, 1);
+    /// <summary>How long one check (with the load, when an import ran) may take before it is given up.</summary>
+    public static readonly TimeSpan CheckTimeout = TimeSpan.FromSeconds(15);
+
+    private readonly object _lock = new();
     private readonly TimeSpan _checkEvery = TimeSpan.FromSeconds(Math.Max(0, options.Value.VersionCheckSeconds));
     private Entry? _current;
+    private Task<TimetableSnapshot>? _check;
     private DateTimeOffset? _failedAt;
 
-    /// <summary>The current snapshot: from memory while its version was checked less than
-    /// <see cref="TimetableCacheOptions.VersionCheckSeconds"/> ago, else after checking (and reloading, if an import
-    /// ran).</summary>
+    /// <summary>The current snapshot. From memory while its version was checked less than
+    /// <see cref="TimetableCacheOptions.VersionCheckSeconds"/> ago; after that, the request that starts the check waits
+    /// for it and the others get the snapshot in memory.</summary>
     public async ValueTask<TimetableSnapshot> GetAsync(CancellationToken cancellationToken)
     {
         var current = Volatile.Read(ref _current);
@@ -56,65 +66,83 @@ public sealed partial class TimetableCache(IServiceScopeFactory scopes, TimeProv
             return current.Snapshot;
         }
 
-        return await RefreshAsync(covers: null, cancellationToken);
+        var check = StartCheck(out var started);
+        if (current is not null && !started)
+        {
+            metrics.CacheHit();
+            return current.Snapshot;
+        }
+
+        return await check.WaitAsync(cancellationToken);
     }
 
-    /// <summary>The current snapshot, checked against the database first (at most once per
-    /// <see cref="MissCheckInterval"/>) when it doesn't satisfy <paramref name="covers"/>: it lacks an id the caller has
-    /// from the database or a client.</summary>
-    public async ValueTask<TimetableSnapshot> GetAsync(Func<TimetableSnapshot, bool> covers, CancellationToken cancellationToken)
+    /// <summary>The current snapshot, checked against the database first when it doesn't satisfy
+    /// <paramref name="covers"/> (it lacks an id the caller has). <paramref name="idsFromDatabase"/>: the ids come from
+    /// the database or were just checked there, so they exist and a miss always checks; otherwise (a client's ids) at
+    /// most once per <see cref="MissCheckInterval"/>.</summary>
+    public async ValueTask<TimetableSnapshot> GetAsync(Func<TimetableSnapshot, bool> covers, bool idsFromDatabase,
+        CancellationToken cancellationToken)
     {
         var snapshot = await GetAsync(cancellationToken);
-        return covers(snapshot) ? snapshot : await RefreshAsync(covers, cancellationToken);
-    }
+        if (covers(snapshot) || (!idsFromDatabase && Age(Volatile.Read(ref _current)!) < MissCheckInterval))
+        {
+            return snapshot;
+        }
 
-    public void Dispose() => _gate.Dispose();
+        // A check already running may have asked before the id existed: if it doesn't have it, one more of our own.
+        var checkedSnapshot = await StartCheck(out var started).WaitAsync(cancellationToken);
+        return covers(checkedSnapshot) || started ? checkedSnapshot : await StartCheck(out _).WaitAsync(cancellationToken);
+    }
 
     private TimeSpan Age(Entry entry) => time.GetUtcNow() - entry.CheckedAt;
 
-    private async Task<TimetableSnapshot> RefreshAsync(Func<TimetableSnapshot, bool>? covers, CancellationToken cancellationToken)
+    /// <summary>The check in flight, or a new one (<paramref name="started"/>).</summary>
+    private Task<TimetableSnapshot> StartCheck(out bool started)
     {
-        await _gate.WaitAsync(cancellationToken);
+        lock (_lock)
+        {
+            started = _check is null || _check.IsCompleted;
+            if (started)
+            {
+                _check = Task.Run(RunCheckAsync);
+                // Observed here, so a check nobody waits for any more never surfaces as an unobserved exception.
+                _check.ContinueWith(static t => _ = t.Exception, CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            }
+
+            return _check!;
+        }
+    }
+
+    private async Task<TimetableSnapshot> RunCheckAsync()
+    {
+        var current = Volatile.Read(ref _current);
+        if (current is null && _failedAt is { } failedAt && time.GetUtcNow() - failedAt < MissCheckInterval)
+        {
+            throw new InvalidOperationException("The timetable couldn't be loaded from the database a moment ago; not trying again yet.");
+        }
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.ApplicationStopping);
+        timeout.CancelAfter(CheckTimeout);
         try
         {
-            // What the request before this one found serves this one too: it is fresh, or it has what this lookup looks
-            // for, or (a lookup that misses) the database was asked less than a second ago.
-            var current = _current;
-            if (current is not null && (covers is null ? Age(current) < _checkEvery : covers(current.Snapshot) || Age(current) < MissCheckInterval))
-            {
-                metrics.CacheHit();
-                return current.Snapshot;
-            }
-
-            if (current is null && _failedAt is { } failedAt && time.GetUtcNow() - failedAt < MissCheckInterval)
-            {
-                throw new InvalidOperationException("The timetable couldn't be loaded from the database a moment ago; not trying again yet.");
-            }
-
-            try
-            {
-                var snapshot = await CheckAsync(current, cancellationToken);
-                _failedAt = null;
-                return snapshot;
-            }
-            catch (Exception e) when (IsDatabaseFailure(e) && !cancellationToken.IsCancellationRequested)
-            {
-                if (current is null)
-                {
-                    _failedAt = time.GetUtcNow();
-                    throw;
-                }
-
-                // Served from memory for another interval: an import may be late, but timetable reads keep working.
-                Publish(current.Snapshot);
-                metrics.CacheHit();
-                LogServingStale(logger, e.GetType().Name, _checkEvery.TotalSeconds);
-                return current.Snapshot;
-            }
+            var snapshot = await CheckAsync(current, timeout.Token);
+            _failedAt = null;
+            return snapshot;
         }
-        finally
+        catch (Exception e) when (!lifetime.ApplicationStopping.IsCancellationRequested
+            && (IsDatabaseFailure(e) || e is OperationCanceledException))
         {
-            _gate.Release();
+            if (current is null)
+            {
+                _failedAt = time.GetUtcNow();
+                throw;
+            }
+
+            // Served from memory for another interval: an import may be late, but timetable reads keep working.
+            Publish(current.Snapshot);
+            LogServingStale(logger, e.GetType().Name, _checkEvery.TotalSeconds);
+            return current.Snapshot;
         }
     }
 

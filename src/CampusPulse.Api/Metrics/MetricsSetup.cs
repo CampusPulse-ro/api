@@ -65,9 +65,15 @@ public static class MetricsSetup
         // The listener is bound to 127.0.0.1 here, whatever the configured URLs say, so it can't end up on a public
         // interface. Without configured URLs (a container's ASPNETCORE_HTTP_PORTS) nothing is added: put it in the URLs.
         var urls = builder.WebHost.GetSetting(WebHostDefaults.ServerUrlsKey);
-        if (!string.IsNullOrWhiteSpace(urls)
-            && !urls.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Any(url => BindingAddress.Parse(url).Port == port))
+        if (!string.IsNullOrWhiteSpace(urls))
         {
+            // On a port the API already serves, every API request there would be answered 404 and /metrics served
+            // where nginx proxies: refuse to start instead.
+            if (urls.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Any(url => BindingAddress.Parse(url).Port == port))
+            {
+                throw new InvalidOperationException($"Metrics__Port ({port}) is a port the API already listens on ({urls}): give metrics a port of their own.");
+            }
+
             builder.WebHost.UseUrls($"{urls};http://127.0.0.1:{port}");
         }
 

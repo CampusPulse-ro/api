@@ -47,13 +47,19 @@ public sealed class HttpCachingTests(ImportedTimetable timetable) : IClassFixtur
         return (client, oid, group);
     }
 
+    /// <summary>Shared answers: a browser may keep those not tied to today for 60 s; those that depend on today's date
+    /// (the current semester, a timetable without dates) it asks again each time, so it never shows yesterday.</summary>
     [PostgresFact]
     public async Task Shared_timetable_reads_carry_a_content_ETag_and_answer_304_when_unchanged()
     {
         var (client, oid, group) = await Student();
 
-        foreach (var path in new[] { "/timetable/programmes", "/semesters/current", $"/timetable/groups/{group.Id}?from=2030-09-30&to=2030-10-06",
-            $"/timetable/groups/{group.Id}/choices", "/rooms", "/rooms/K210/timetable?date=2030-09-30" })
+        foreach (var (path, today) in new[]
+        {
+            ("/timetable/programmes", true), ("/semesters/current", true), ($"/timetable/groups/{group.Id}", true),
+            ($"/timetable/groups/{group.Id}?from=2030-09-30&to=2030-10-06", false), ($"/timetable/groups/{group.Id}/choices", false),
+            ("/rooms", false), ("/rooms/K210/timetable", true), ("/rooms/K210/timetable?date=2030-09-30", false),
+        })
         {
             var first = await client.SendAsync(Request(HttpMethod.Get, path, oid));
             var body = await first.Content.ReadAsByteArrayAsync();
@@ -63,8 +69,8 @@ public sealed class HttpCachingTests(ImportedTimetable timetable) : IClassFixtur
             Assert.NotNull(etag);
             Assert.True(etag.IsWeak, path);
             Assert.Equal(HttpCaching.ETagOf(body).ToString(), etag.ToString());   // the tag is the content's
-            Assert.True(first.Headers.CacheControl is { Private: true, NoCache: false, NoStore: false }, $"{path}: {first.Headers.CacheControl}");
-            Assert.Equal(TimeSpan.FromSeconds(60), first.Headers.CacheControl!.MaxAge);
+            Assert.True(first.Headers.CacheControl is { Private: true, NoStore: false }, $"{path}: {first.Headers.CacheControl}");
+            Assert.Equal((today, today ? null : TimeSpan.FromSeconds(60)), (first.Headers.CacheControl!.NoCache, first.Headers.CacheControl.MaxAge));
 
             var unchanged = await client.SendAsync(Request(HttpMethod.Get, path, oid, ifNoneMatch: etag));
             Assert.Equal(HttpStatusCode.NotModified, unchanged.StatusCode);
@@ -76,8 +82,9 @@ public sealed class HttpCachingTests(ImportedTimetable timetable) : IClassFixtur
         }
     }
 
-    /// <summary>The student's own data: revalidated every time (no-cache), so a change shows at once, and a 304 when
-    /// nothing changed.</summary>
+    /// <summary>The student's own data: never stored by a browser (no-store: a shared lab PC keeps nothing after
+    /// sign-out), but tagged, so a client that keeps its own copy gets a 304 when nothing changed, and a new tag when it
+    /// did.</summary>
     [PostgresFact]
     public async Task A_students_own_reads_are_revalidated_and_change_with_their_data()
     {
@@ -88,7 +95,7 @@ public sealed class HttpCachingTests(ImportedTimetable timetable) : IClassFixtur
         {
             var response = await client.SendAsync(Request(HttpMethod.Get, path, oid));
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-            Assert.True(response.Headers.CacheControl is { Private: true, NoCache: true, MaxAge: null }, $"{path}: {response.Headers.CacheControl}");
+            Assert.True(response.Headers.CacheControl is { Private: true, NoStore: true, MaxAge: null }, $"{path}: {response.Headers.CacheControl}");
             Assert.NotNull(response.Headers.ETag);
         }
 

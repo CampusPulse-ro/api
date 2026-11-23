@@ -37,9 +37,11 @@ public sealed class RateLimitOptions
     /// <summary>Every request of a signed-in student, counted per student (the token's <c>oid</c>).</summary>
     public TokenBucket SignedIn { get; set; } = new() { Burst = 100, PerMinute = 100 };
 
-    /// <summary>Every request without a valid token (health checks, the contract, refused tokens), counted per client
-    /// IP address (an IPv6 address by its /64, which one host usually has to itself).</summary>
-    public TokenBucket Anonymous { get; set; } = new() { Burst = 100, PerMinute = 100 };
+    /// <summary>Every request without a valid token (readiness checks, the contract, refused tokens), counted per client
+    /// IP address (an IPv6 address by its /64, which one host usually has to itself). Larger than a student's, because a
+    /// campus or dorm network puts many students behind one address, and an expired token's 401 must reach the app (it
+    /// signs the student out) rather than a 429.</summary>
+    public TokenBucket Anonymous { get; set; } = new() { Burst = 300, PerMinute = 300 };
 
     /// <summary>Every write (POST, PUT, PATCH, DELETE), per student or IP, on top of the above.</summary>
     public TokenBucket Writes { get; set; } = new() { Burst = 30, PerMinute = 30 };
@@ -55,8 +57,10 @@ public sealed class RateLimitOptions
 /// <summary>
 /// Per-client rate limits (ASP.NET Core's RateLimiter), from <see cref="RateLimitOptions"/>. Every request takes a
 /// token from its client's bucket (<see cref="RateLimitOptions.SignedIn"/> or <see cref="RateLimitOptions.Anonymous"/>)
-/// and every write one from its write bucket too, so a new endpoint is limited without anyone remembering to; account
-/// creation and deletion also take one from <see cref="RateLimitOptions.Account"/> (<see cref="AccountPolicy"/>).
+/// and every write one from its write bucket first, so a new endpoint is limited without anyone remembering to and a
+/// refused write costs no read; account creation and deletion also take one from <see cref="RateLimitOptions.Account"/>
+/// (<see cref="AccountPolicy"/>). <c>GET /health</c> is exempt: answering it costs less than refusing it, and a status
+/// check must never report an outage that isn't one.
 /// <para>A refused request is a 429 ProblemDetails with <c>Retry-After</c> (seconds), and is counted for
 /// <see cref="RateLimitLog"/>: counts only, never who. Buckets live in this process's memory, as the test
 /// notification's limit does: a restart empties them, and each API instance counts on its own.</para>
@@ -98,16 +102,18 @@ public static class RateLimitSetup
     private static void Configure(RateLimiterOptions limiter, RateLimitOptions settings)
     {
         limiter.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+        // Writes first: a token bucket doesn't get a token back when a later limiter in the chain refuses, so this way a
+        // refused write costs nothing from the client's general bucket.
         limiter.GlobalLimiter = PartitionedRateLimiter.CreateChained(
+            PartitionedRateLimiter.Create<HttpContext, string>(context => IsWrite(context.Request.Method)
+                ? RateLimitPartition.GetTokenBucketLimiter(ClientKey(context), _ => settings.Writes.Options())
+                : RateLimitPartition.GetNoLimiter("read")),
             PartitionedRateLimiter.Create<HttpContext, string>(context =>
             {
                 var key = ClientKey(context);
                 var bucket = key.StartsWith(UserPrefix, StringComparison.Ordinal) ? settings.SignedIn : settings.Anonymous;
                 return RateLimitPartition.GetTokenBucketLimiter(key, _ => bucket.Options());
-            }),
-            PartitionedRateLimiter.Create<HttpContext, string>(context => IsWrite(context.Request.Method)
-                ? RateLimitPartition.GetTokenBucketLimiter(ClientKey(context), _ => settings.Writes.Options())
-                : RateLimitPartition.GetNoLimiter("read")));
+            }));
         limiter.AddPolicy(AccountPolicy, context => RateLimitPartition.GetTokenBucketLimiter(ClientKey(context), _ => settings.Account.Options()));
         limiter.OnRejected = async (rejected, cancellationToken) =>
         {

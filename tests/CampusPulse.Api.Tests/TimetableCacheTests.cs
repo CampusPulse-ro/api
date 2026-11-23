@@ -35,8 +35,9 @@ public sealed class TimetableCacheTests(ImportedTimetable timetable) : IClassFix
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
     };
 
-    /// <summary>Counts the SQL commands the app sends; with <see cref="DatabaseDown"/>, every query fails as if the
-    /// database couldn't be reached.</summary>
+    /// <summary>Counts the SQL commands the app sends. With <see cref="DatabaseDown"/>, every query fails as if the
+    /// database couldn't be reached; with <see cref="Hold"/>, every query waits for it (a slow database), after setting
+    /// <see cref="Held"/>.</summary>
     private sealed class CommandCounter : DbCommandInterceptor
     {
         private int _count;
@@ -45,15 +46,28 @@ public sealed class TimetableCacheTests(ImportedTimetable timetable) : IClassFix
 
         public bool DatabaseDown { get; set; }
 
+        public Task? Hold { get; set; }
+
+        public TaskCompletionSource Held { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         public void Reset() => Interlocked.Exchange(ref _count, 0);
 
-        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command, CommandEventData eventData,
+        public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command, CommandEventData eventData,
             InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
         {
             Interlocked.Increment(ref _count);
-            return DatabaseDown
-                ? throw new NpgsqlException("The database can't be reached (test).")
-                : base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
+            if (DatabaseDown)
+            {
+                throw new NpgsqlException("The database can't be reached (test).");
+            }
+
+            if (Hold is { } hold)
+            {
+                Held.TrySetResult();
+                await hold;
+            }
+
+            return await base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
         }
 
         public override ValueTask<InterceptionResult<object>> ScalarExecutingAsync(DbCommand command, CommandEventData eventData,
@@ -314,6 +328,53 @@ public sealed class TimetableCacheTests(ImportedTimetable timetable) : IClassFix
         Assert.Equal(1, commands.Count);   // one failed check, then from memory
         var warning = Assert.Single(logs.Entries, e => e.Category == typeof(TimetableCache).FullName && e.Level == LogLevel.Warning);
         Assert.Contains("serving the timetable in memory", warning.Message);
+    }
+
+    /// <summary>A slow database stalls only the request that started the check; the others are answered from memory
+    /// meanwhile.</summary>
+    [PostgresFact]
+    public async Task While_a_check_waits_on_the_database_other_reads_are_answered_from_memory()
+    {
+        var commands = new CommandCounter();
+        var clock = new TestClock(Now);
+        using var app = App(clock, commands);
+        var client = app.CreateClient();
+        var oid = NewOid();
+        var before = await Get<List<RoomResponse>>(client, "/rooms", oid);
+
+        var release = new TaskCompletionSource();
+        commands.Hold = release.Task;
+        clock.Advance(TimeSpan.FromSeconds(61));
+        var checking = client.SendAsync(Request(HttpMethod.Get, "/rooms", oid));
+        await commands.Held.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        var others = await Task.WhenAll(Enumerable.Range(0, 5).Select(_ => Get<List<RoomResponse>>(client, "/rooms", oid)))
+            .WaitAsync(TimeSpan.FromSeconds(30));
+        var stillChecking = !checking.IsCompleted;
+        commands.Hold = null;
+        release.SetResult();
+
+        Assert.True(stillChecking);
+        Assert.All(others, rooms => Assert.Equal(before.Count, rooms.Count));
+        Assert.Equal(HttpStatusCode.OK, (await checking).StatusCode);
+    }
+
+    /// <summary>A group a student picks from an import the cache hasn't seen yet is in the answer: it was just checked in
+    /// the database, so the cache checks too, even within a second of its last check.</summary>
+    [PostgresFact]
+    public async Task Picking_a_group_from_a_newer_import_answers_with_that_group()
+    {
+        using var app = App(new TestClock(Now), new CommandCounter());
+        var client = app.CreateClient();
+        var oid = NewOid();
+        Assert.Equal(HttpStatusCode.Created, (await client.SendAsync(Request(HttpMethod.Post, "/me", oid))).StatusCode);
+        await Get<List<RoomResponse>>(client, "/rooms", oid);
+
+        await ImportAnotherYear("2046-2047", "2046-09-24", "Programul Alfa");
+        var newGroup = await AGroupOf("2046-2047");
+        var response = await client.SendAsync(Request(HttpMethod.Put, "/me/settings", oid, new { studyGroupId = newGroup }));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(newGroup, (await response.Content.ReadFromJsonAsync<StudentSettingsResponse>(Json))!.StudyGroup?.Id);
     }
 
     /// <summary>With nothing in memory yet and the database down, a failed load fails the requests of the next second

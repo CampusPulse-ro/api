@@ -6,15 +6,23 @@ using Microsoft.Net.Http.Headers;
 
 namespace CampusPulse.Api.Http;
 
-/// <summary>Who a GET's answer is the same for, which decides how long a browser may keep it.</summary>
+/// <summary>Who a GET's answer is the same for, and whether it depends on today's date: that decides what a browser may
+/// keep.</summary>
 public enum HttpCacheScope
 {
-    /// <summary>The same for every student (the timetable): a browser may reuse it for 60 s without asking.
-    /// <c>private</c> all the same, because it needs sign-in: no shared cache (a CDN, a proxy) may store it.</summary>
+    /// <summary>The same for every student and not tied to today (a given week, a room's list): a browser may reuse it
+    /// for 60 s without asking. <c>private</c> all the same, because it needs sign-in: no shared cache (a CDN, a proxy)
+    /// may store it.</summary>
     Shared,
 
-    /// <summary>One student's own data: <c>private, no-cache</c>, so a browser asks again every time (getting a 304
-    /// when nothing changed) and never shows a change late.</summary>
+    /// <summary>The same for every student but depending on today's date (the current semester and week, a timetable
+    /// that defaults to today): <c>private, no-cache</c>, so a browser asks each time (a 304 when nothing changed) and
+    /// never shows yesterday after midnight.</summary>
+    SharedToday,
+
+    /// <summary>One student's own data: <c>private, no-store</c>, so it is never written to a browser's disk cache (a
+    /// shared lab PC keeps nothing after sign-out). A client that keeps its own copy can still send
+    /// <c>If-None-Match</c> and get a 304.</summary>
     PerStudent,
 }
 
@@ -27,16 +35,29 @@ public enum HttpCacheScope
 public static class HttpCaching
 {
     public const string SharedCacheControl = "private, max-age=60";
-    public const string PerStudentCacheControl = "private, no-cache";
+    public const string SharedTodayCacheControl = "private, no-cache";
+    public const string PerStudentCacheControl = "private, no-store";
 
     public static RouteHandlerBuilder WithHttpCaching(this RouteHandlerBuilder builder, HttpCacheScope scope) =>
-        builder.AddEndpointFilter(new ConditionalGetFilter(scope)).Produces(StatusCodes.Status304NotModified);
+        builder.WithHttpCaching(_ => scope);
+
+    /// <summary>Conditional GETs whose scope depends on the request (a timetable that defaults to today when it has no
+    /// dates).</summary>
+    public static RouteHandlerBuilder WithHttpCaching(this RouteHandlerBuilder builder, Func<HttpRequest, HttpCacheScope> scopeOf) =>
+        builder.AddEndpointFilter(new ConditionalGetFilter(scopeOf)).Produces(StatusCodes.Status304NotModified);
 
     /// <summary>The weak entity tag of a JSON body: 128 bits of its SHA-256.</summary>
     public static EntityTagHeaderValue ETagOf(ReadOnlySpan<byte> body) =>
         new($"\"{Convert.ToHexStringLower(SHA256.HashData(body).AsSpan(0, 16))}\"", isWeak: true);
 
-    private sealed class ConditionalGetFilter(HttpCacheScope scope) : IEndpointFilter
+    private static string CacheControl(HttpCacheScope scope) => scope switch
+    {
+        HttpCacheScope.Shared => SharedCacheControl,
+        HttpCacheScope.SharedToday => SharedTodayCacheControl,
+        _ => PerStudentCacheControl,
+    };
+
+    private sealed class ConditionalGetFilter(Func<HttpRequest, HttpCacheScope> scopeOf) : IEndpointFilter
     {
         public async ValueTask<object?> InvokeAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
         {
@@ -58,7 +79,7 @@ public static class HttpCaching
             var etag = ETagOf(body);
 
             http.Response.GetTypedHeaders().ETag = etag;
-            http.Response.Headers.CacheControl = scope == HttpCacheScope.Shared ? SharedCacheControl : PerStudentCacheControl;
+            http.Response.Headers.CacheControl = CacheControl(scopeOf(http.Request));
             var ifNoneMatch = http.Request.GetTypedHeaders().IfNoneMatch;
             if (ifNoneMatch.Any(candidate => candidate.Equals(EntityTagHeaderValue.Any) || candidate.Compare(etag, useStrongComparison: false)))
             {

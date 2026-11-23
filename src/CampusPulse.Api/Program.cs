@@ -190,9 +190,11 @@ app.MapGet("/", () => Results.Ok(new
     .AllowAnonymous()
     .ExcludeFromDescription();
 
-// Liveness only: it does not touch the database, so it answers while Postgres is down.
-api.MapGet("/health", () => Results.Ok(new HealthResponse("ok")))
+// Liveness only: it does not touch the database, so it answers while Postgres is down. Not rate limited (and so not
+// in the group above): answering it costs less than refusing it, and a status check must never report a false outage.
+app.MapGet("/health", () => Results.Ok(new HealthResponse("ok")))
     .AllowAnonymous()
+    .DisableRateLimiting()
     .Produces<HealthResponse>()
     .WithName("GetHealth")
     .WithTags("Health");

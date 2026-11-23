@@ -153,19 +153,19 @@ public static class TimetableEndpoints
 
         timetable.MapGet("/semesters/current", GetCurrentSemester)
             .WithName("GetCurrentSemester")
-            .WithHttpCaching(HttpCacheScope.Shared)
+            .WithHttpCaching(HttpCacheScope.SharedToday)
             .ProducesProblem(StatusCodes.Status404NotFound)
             .Produces(StatusCodes.Status401Unauthorized);
 
         timetable.MapGet("/timetable/programmes", GetProgrammes)
             .WithName("GetProgrammes")
-            .WithHttpCaching(HttpCacheScope.Shared)
+            .WithHttpCaching(HttpCacheScope.SharedToday)
             .ProducesProblem(StatusCodes.Status404NotFound)
             .Produces(StatusCodes.Status401Unauthorized);
 
         timetable.MapGet("/timetable/groups/{id:guid}", GetGroupTimetable)
             .WithName("GetGroupTimetable")
-            .WithHttpCaching(HttpCacheScope.Shared)
+            .WithHttpCaching(request => request.Query.ContainsKey("from") || request.Query.ContainsKey("to") ? HttpCacheScope.Shared : HttpCacheScope.SharedToday)
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status404NotFound)
             .Produces(StatusCodes.Status401Unauthorized);
@@ -219,7 +219,7 @@ public static class TimetableEndpoints
 
         timetable.MapGet("/rooms/{code}/timetable", GetRoomTimetable)
             .WithName("GetRoomTimetable")
-            .WithHttpCaching(HttpCacheScope.Shared)
+            .WithHttpCaching(request => request.Query.ContainsKey("date") ? HttpCacheScope.Shared : HttpCacheScope.SharedToday)
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status404NotFound)
             .Produces(StatusCodes.Status401Unauthorized);
@@ -232,7 +232,7 @@ public static class TimetableEndpoints
         TimeProvider time, CancellationToken cancellationToken)
     {
         var today = Today(time);
-        var timetable = await cache.GetAsync(t => t.CurrentSemester(today) is not null, cancellationToken);
+        var timetable = await cache.GetAsync(t => t.CurrentSemester(today) is not null, idsFromDatabase: false, cancellationToken);
         if (timetable.CurrentSemester(today) is not { } semester)
         {
             return NoTimetable();
@@ -251,7 +251,7 @@ public static class TimetableEndpoints
         TimeProvider time, CancellationToken cancellationToken)
     {
         var today = Today(time);
-        var timetable = await cache.GetAsync(t => t.CurrentSemester(today) is not null, cancellationToken);
+        var timetable = await cache.GetAsync(t => t.CurrentSemester(today) is not null, idsFromDatabase: false, cancellationToken);
         return timetable.CurrentSemester(today) is { } semester ? TypedResults.Ok(timetable.Programmes(semester.Id)) : NoTimetable();
     }
 
@@ -265,7 +265,7 @@ public static class TimetableEndpoints
         }
 
         var (first, last) = range;
-        var timetable = await cache.GetAsync(t => t.Group(id) is not null, cancellationToken);
+        var timetable = await cache.GetAsync(t => t.Group(id) is not null, idsFromDatabase: false, cancellationToken);
         if (timetable.Group(id) is null)
         {
             return NoGroup();
@@ -278,7 +278,7 @@ public static class TimetableEndpoints
     internal static async Task<Results<Ok<IReadOnlyList<ChoiceSubjectResponse>>, ProblemHttpResult>> GetGroupChoices(Guid id,
         TimetableCache cache, CancellationToken cancellationToken)
     {
-        var timetable = await cache.GetAsync(t => t.Group(id) is not null, cancellationToken);
+        var timetable = await cache.GetAsync(t => t.Group(id) is not null, idsFromDatabase: false, cancellationToken);
         return timetable.Group(id) is { } group ? TypedResults.Ok(timetable.Choices(group)) : NoGroup();
     }
 
@@ -293,10 +293,12 @@ public static class TimetableEndpoints
         return TypedResults.Ok(await SettingsResponseAsync(cache, student.StudyGroupId, time, cancellationToken));
     }
 
+    /// <summary>The settings body for <paramref name="groupId"/>, which comes from the database (the student's row, or a
+    /// group just checked there), so the cache checks at once if it doesn't have it yet.</summary>
     private static async Task<StudentSettingsResponse> SettingsResponseAsync(TimetableCache cache, Guid? groupId, TimeProvider time,
         CancellationToken cancellationToken)
     {
-        var timetable = await cache.GetAsync(t => groupId is null || t.Group(groupId.Value) is not null, cancellationToken);
+        var timetable = await cache.GetAsync(t => groupId is null || t.Group(groupId.Value) is not null, idsFromDatabase: true, cancellationToken);
         if (groupId is null || timetable.Group(groupId.Value) is not { } group)
         {
             return new StudentSettingsResponse(null, false, false);
@@ -359,7 +361,7 @@ public static class TimetableEndpoints
             return MeEndpoint.NoAccount();
         }
 
-        var timetable = await cache.GetAsync(t => student.Subjects.All(p => t.Subject(p.SubjectId) is not null), cancellationToken);
+        var timetable = await cache.GetAsync(t => student.Subjects.All(p => t.Subject(p.SubjectId) is not null), idsFromDatabase: true, cancellationToken);
         IReadOnlyList<StudentSubjectResponse> body = [.. student.Subjects
             .Select(p => (Pick: p, Subject: timetable.Subject(p.SubjectId)))
             .Where(x => x.Subject is not null)
@@ -469,7 +471,7 @@ public static class TimetableEndpoints
         }
 
         var timetable = await cache.GetAsync(t => (student.StudyGroupId is not { } groupId || t.Group(groupId) is not null)
-            && student.Subjects.All(s => s.OfferedSlotId is not { } offerId || t.HasOffer(offerId)), cancellationToken);
+            && student.Subjects.All(s => s.OfferedSlotId is not { } offerId || t.HasOffer(offerId)), idsFromDatabase: true, cancellationToken);
         return TypedResults.Ok(TimetableResponseOf(timetable, student.StudyGroupId, first, last, timetable.ForStudent(student, first, last)));
     }
 
@@ -487,7 +489,7 @@ public static class TimetableEndpoints
         }
 
         var normalized = Import.CellText.NormalizeRoom(code);
-        var timetable = await cache.GetAsync(t => t.Room(normalized) is not null, cancellationToken);
+        var timetable = await cache.GetAsync(t => t.Room(normalized) is not null, idsFromDatabase: false, cancellationToken);
         if (timetable.Room(normalized) is not { } room)
         {
             return TypedResults.Problem(statusCode: StatusCodes.Status404NotFound, title: "No such room");

@@ -32,8 +32,8 @@ public sealed class HealthAndContractTests(CampusPulseAppFactory factory)
         Assert.True(responses.TryGetProperty("503", out _));
     }
 
-    /// <summary>The rate limits can refuse any call, so every operation lists the 429 (a ProblemDetails); the GETs that
-    /// answer conditional requests list the 304.</summary>
+    /// <summary>The rate limits can refuse any call but liveness, so every other operation lists the 429 (a
+    /// ProblemDetails); the GETs that answer conditional requests list the 304.</summary>
     [Fact]
     public async Task The_contract_lists_429_everywhere_and_304_on_the_cached_reads()
     {
@@ -42,8 +42,9 @@ public sealed class HealthAndContractTests(CampusPulseAppFactory factory)
             .SelectMany(path => path.Value.EnumerateObject().Select(op => (Path: path.Name, Method: op.Name, Responses: op.Value.GetProperty("responses"))))
             .ToList();
 
-        Assert.All(operations, op => Assert.True(op.Responses.TryGetProperty("429", out var tooMany)
+        Assert.All(operations.Where(op => op.Path != "/health"), op => Assert.True(op.Responses.TryGetProperty("429", out var tooMany)
             && tooMany.GetProperty("content").TryGetProperty("application/problem+json", out _), $"{op.Method} {op.Path}: no 429"));
+        Assert.False(operations.Single(op => op.Path == "/health").Responses.TryGetProperty("429", out _));
         var cached = operations.Where(op => op.Responses.TryGetProperty("304", out _)).Select(op => $"{op.Method} {op.Path}").Order(StringComparer.Ordinal);
         Assert.Equal(
             [
