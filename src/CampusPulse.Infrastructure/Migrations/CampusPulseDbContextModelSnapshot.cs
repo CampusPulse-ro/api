@@ -18,7 +18,7 @@ namespace CampusPulse.Infrastructure.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "10.0.13")
+                .HasAnnotation("ProductVersion", "10.0.14")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
@@ -600,6 +600,9 @@ namespace CampusPulse.Infrastructure.Migrations
 
                     b.HasKey("Id")
                         .HasName("pk_timetable_import_runs");
+
+                    b.HasIndex("ImportedAt", "Id")
+                        .HasDatabaseName("ix_timetable_import_runs_imported_at_id");
 
                     b.HasIndex("SemesterId", "Source", "ImportedAt")
                         .HasDatabaseName("ix_timetable_import_runs_semester_id_source_imported_at");

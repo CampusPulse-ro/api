@@ -185,7 +185,7 @@ public static class PushEndpoints
                 detail: "One test notification per minute.");
         }
 
-        var devices = await db.PushDevices.Where(d => d.UserId == user.Id).ToListAsync(cancellationToken);
+        var devices = await db.PushDevices.AsNoTracking().Where(d => d.UserId == user.Id).ToListAsync(cancellationToken);
         PushDeliveryResult result;
         try
         {

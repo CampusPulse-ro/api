@@ -3,13 +3,17 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using CampusPulse.Api;
 using CampusPulse.Api.Auth;
+using CampusPulse.Api.Http;
 using CampusPulse.Api.Logging;
+using CampusPulse.Api.Metrics;
 using CampusPulse.Api.Push;
+using CampusPulse.Api.RateLimiting;
 using CampusPulse.Api.Reminders;
 using CampusPulse.Api.Timetable;
 using CampusPulse.Api.Timetable.Import;
 using CampusPulse.Api.Users;
 using CampusPulse.Infrastructure;
+using Microsoft.Net.Http.Headers;
 
 // The one-off timetable import (CampusPulse-ro/api#5) is a mode of this same binary, so the Pi runs it
 // from the deployed release like the migrations: `CampusPulse.Api import-timetable …`. It never starts
@@ -54,6 +58,12 @@ builder.Services.AddOpenApi(options => options.AddBearerSecurity());
 
 builder.Services.AddSingleton(TimeProvider.System);
 
+// Metrics on a loopback-only listener when Metrics:Port is set (see MetricsSetup); the instruments always exist.
+builder.AddCampusPulseMetrics();
+
+// The shared timetable, kept in memory and reloaded after an import (see TimetableCache).
+builder.Services.AddCampusPulseTimetable(builder.Configuration);
+
 // Push notifications through Expo, and the background check of their receipts (see PushSetup).
 builder.Services.AddCampusPulsePush();
 
@@ -62,6 +72,18 @@ builder.Services.AddCampusPulseReminders(builder.Configuration);
 
 // Microsoft sign-in (UPT accounts). Unconfigured, it fails closed: see AuthSetup.
 var auth = builder.Services.AddCampusPulseAuth(builder.Configuration);
+
+// Behind nginx: the client's address and scheme from nginx's X-Forwarded-* headers, trusted from loopback only.
+builder.Services.AddCampusPulseProxyHeaders();
+
+// Per-client rate limits (RateLimits section, see RateLimitSetup).
+builder.Services.AddCampusPulseRateLimiting(builder.Configuration);
+
+// Body size and time limits per request, no Server header, Brotli/gzip (Limits section, see RequestLimits).
+builder.AddCampusPulseRequestLimits();
+
+// HSTS on HTTPS responses (behind nginx, every public request): a browser never tries plain HTTP for a year.
+builder.Services.AddHsts(options => options.MaxAge = TimeSpan.FromDays(365));
 
 // Unhandled exceptions become a ProblemDetails 500; the exception itself is logged with its stack
 // trace by the exception handler. Every problem carries requestId (the X-Request-Id, which every
@@ -72,13 +94,16 @@ builder.Services.AddProblemDetails(options => options.CustomizeProblemDetails = 
 
 // The web app calls the API from the browser. Origins per environment: Cors:AllowedOrigins
 // (see CorsOrigins). Bearer tokens, not cookies, so no credentials mode. X-Request-Id is exposed so
-// the web app can read it (a browser hides non-safelisted response headers from scripts otherwise).
+// the web app can read it (a browser hides non-safelisted response headers from scripts otherwise), and so is
+// Retry-After, for a 429. A browser may reuse a preflight's answer for 2 hours (Chrome's cap) instead of sending an
+// OPTIONS before every call: every call carries Authorization, so every call would need one.
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy => policy
     .SetIsOriginAllowed(origin => CorsOrigins.IsAllowed(origin, allowedOrigins))
     .AllowAnyHeader()
     .AllowAnyMethod()
-    .WithExposedHeaders(RequestIds.HeaderName)));
+    .WithExposedHeaders(RequestIds.HeaderName, HeaderNames.RetryAfter)
+    .SetPreflightMaxAge(TimeSpan.FromHours(2))));
 
 var app = builder.Build();
 
@@ -88,31 +113,56 @@ if (auth is null && !writingOpenApiDocument)
         "Sign-in is NOT configured (Auth__TenantId, Auth__ClientId unset): every endpoint that needs it answers 401.");
 }
 
-// Outermost, so the request's log line and its X-Request-Id cover the exception handler too.
+// Metrics first, on their own loopback port only (see MetricsSetup).
+app.UseCampusPulseMetrics();
+// The client's real address and scheme, before anything reads them (the rate limits, HSTS, compression).
+app.UseForwardedHeaders();
+// Outermost after those, so the request's log line and its X-Request-Id cover the exception handler too.
 app.UseMiddleware<RequestLoggingMiddleware>();
+app.UseMiddleware<SecurityHeaders>();
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHsts();
+}
+
+app.UseResponseCompression();
 app.UseExceptionHandler();
 // A 400 with no body (a request body that couldn't be read: bad JSON, a missing field, an enum
-// value outside the contract) gets a ProblemDetails body like every other error. Other empty
-// statuses (401 from the token check, an unknown path's 404) stay as they are.
+// value outside the contract) or a 413 (a body over Limits:MaxRequestBodyBytes) gets a ProblemDetails
+// body like every other error. Other empty statuses (401 from the token check, an unknown path's
+// 404) stay as they are.
 app.UseStatusCodePages(async context =>
 {
     var http = context.HttpContext;
-    if (http.Response.StatusCode == StatusCodes.Status400BadRequest)
+    var problem = http.Response.StatusCode switch
+    {
+        StatusCodes.Status400BadRequest => new Microsoft.AspNetCore.Mvc.ProblemDetails
+        {
+            Status = StatusCodes.Status400BadRequest,
+            Title = "Bad request",
+            Detail = "The request body is missing, isn't JSON, or doesn't match the contract (/openapi/v1.json).",
+        },
+        StatusCodes.Status413PayloadTooLarge => new Microsoft.AspNetCore.Mvc.ProblemDetails
+        {
+            Status = StatusCodes.Status413PayloadTooLarge,
+            Title = "Request body too large",
+            Detail = "Request bodies are limited to a few kilobytes: this API only takes small JSON bodies.",
+        },
+        _ => null,
+    };
+    if (problem is not null)
     {
         await http.RequestServices.GetRequiredService<IProblemDetailsService>().WriteAsync(new ProblemDetailsContext
         {
             HttpContext = http,
-            ProblemDetails =
-            {
-                Status = StatusCodes.Status400BadRequest,
-                Title = "Bad request",
-                Detail = "The request body is missing, isn't JSON, or doesn't match the contract (/openapi/v1.json).",
-            },
+            ProblemDetails = problem,
         });
     }
 });
 app.UseCors();
 app.UseAuthentication();
+app.UseCampusPulseRateLimiting();
+app.UseRequestTimeouts();
 app.UseAuthorization();
 
 // Served in every environment, not only Development: this document is the contract the
@@ -120,6 +170,12 @@ app.UseAuthorization();
 // on the deployed API too. Every endpoint needs sign-in unless it is marked AllowAnonymous (the
 // fallback policy in AuthSetup); these few are public.
 app.MapOpenApi().AllowAnonymous();
+
+// Every endpoint below can be refused by the rate limits: the contract says so, with the ProblemDetails body
+// (added last, so it is listed after each endpoint's own responses).
+var api = app.MapGroup("");
+((IEndpointConventionBuilder)api).Finally(endpoint => endpoint.Metadata.Add(new ProducesResponseTypeMetadata(StatusCodes.Status429TooManyRequests,
+    typeof(Microsoft.AspNetCore.Mvc.ProblemDetails), ["application/problem+json"])));
 
 // A friendly root, so opening the base URL in a browser shows the API is alive instead of
 // a bare 404, and names the paths a human would look for.
@@ -134,16 +190,18 @@ app.MapGet("/", () => Results.Ok(new
     .AllowAnonymous()
     .ExcludeFromDescription();
 
-// Liveness only: it does not touch the database, so it answers while Postgres is down.
+// Liveness only: it does not touch the database, so it answers while Postgres is down. Not rate limited (and so not
+// in the group above): answering it costs less than refusing it, and a status check must never report a false outage.
 app.MapGet("/health", () => Results.Ok(new HealthResponse("ok")))
     .AllowAnonymous()
+    .DisableRateLimiting()
     .Produces<HealthResponse>()
     .WithName("GetHealth")
     .WithTags("Health");
 
 // Readiness: the API can reach its database. The deploy checks this one, so a release that
 // can't reach its database is rolled back. Bounded, so a hung connection answers 503 fast.
-app.MapGet("/health/ready", async (CampusPulseDbContext db, CancellationToken requestAborted) =>
+api.MapGet("/health/ready", async (CampusPulseDbContext db, CancellationToken requestAborted) =>
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(requestAborted);
         timeout.CancelAfter(TimeSpan.FromSeconds(3));
@@ -167,10 +225,10 @@ app.MapGet("/health/ready", async (CampusPulseDbContext db, CancellationToken re
     .Produces<HealthResponse>(StatusCodes.Status200OK)
     .Produces<HealthResponse>(StatusCodes.Status503ServiceUnavailable);
 
-app.MapMe();
-app.MapPush();
-app.MapTimetable();
-app.MapReminders();
+api.MapMe();
+api.MapPush();
+api.MapTimetable();
+api.MapReminders();
 
 app.Run();
 return 0;

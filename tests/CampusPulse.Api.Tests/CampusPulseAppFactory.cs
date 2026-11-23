@@ -22,5 +22,6 @@ public sealed class CampusPulseAppFactory : WebApplicationFactory<Program>
             "Host=127.0.0.1;Port=1;Database=unused;Username=unused;Password=unused;Timeout=2");
         // No reminder ticks in the background of a test; the reminder tests drive them by hand.
         builder.UseSetting("Reminders:Enabled", "false");
+        TestLimits.Configure(builder);
     }
 }

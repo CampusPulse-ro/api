@@ -1,4 +1,6 @@
 using System.Security.Claims;
+using CampusPulse.Api.Http;
+using CampusPulse.Api.RateLimiting;
 using CampusPulse.Domain.Users;
 using CampusPulse.Infrastructure;
 using Microsoft.AspNetCore.Http.HttpResults;
@@ -27,18 +29,21 @@ public static partial class MeEndpoint
         app.MapGet("/me", GetMe)
             .RequireAuthorization()
             .WithName("GetMe")
+            .WithHttpCaching(HttpCacheScope.PerStudent)
             .WithTags("Users")
             .ProducesProblem(StatusCodes.Status404NotFound)
             .Produces(StatusCodes.Status401Unauthorized);
 
         app.MapPost("/me", CreateMe)
             .RequireAuthorization()
+            .RequireRateLimiting(RateLimitSetup.AccountPolicy)
             .WithName("CreateMe")
             .WithTags("Users")
             .Produces(StatusCodes.Status401Unauthorized);
 
         app.MapDelete("/me", DeleteMe)
             .RequireAuthorization()
+            .RequireRateLimiting(RateLimitSetup.AccountPolicy)
             .WithName("DeleteMe")
             .WithTags("Users")
             .Produces(StatusCodes.Status401Unauthorized);
@@ -156,11 +161,13 @@ public static partial class MeEndpoint
         }
     }
 
-    /// <summary>The signed-in student's account, or null when they have none (answer <see cref="NoAccount"/>).</summary>
+    /// <summary>The signed-in student's account, or null when they have none (answer <see cref="NoAccount"/>). Read
+    /// only (not tracked): callers use it to know who is asking. <see cref="GetMe"/> and <see cref="CreateMe"/> load
+    /// their own tracked row, since they update it.</summary>
     internal static Task<User?> FindUserAsync(CampusPulseDbContext db, ClaimsPrincipal principal, CancellationToken cancellationToken)
     {
         var oid = Identity.From(principal).Oid;
-        return db.Users.SingleOrDefaultAsync(u => u.EntraObjectId == oid, cancellationToken);
+        return db.Users.AsNoTracking().SingleOrDefaultAsync(u => u.EntraObjectId == oid, cancellationToken);
     }
 
     internal static ProblemHttpResult NoAccount() => TypedResults.Problem(

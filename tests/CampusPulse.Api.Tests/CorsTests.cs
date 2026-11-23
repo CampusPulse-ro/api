@@ -77,7 +77,20 @@ public sealed class CorsHttpTests
 
         var response = await factory.CreateClient().SendAsync(request);
 
-        Assert.Contains("X-Request-Id", response.Headers.GetValues("Access-Control-Expose-Headers"));
+        var exposed = response.Headers.GetValues("Access-Control-Expose-Headers").SelectMany(v => v.Split(',', StringSplitOptions.TrimEntries));
+        Assert.Contains("X-Request-Id", exposed);
+    }
+
+    /// <summary>Every call carries Authorization, so every call needs a preflight: the browser may reuse one for 2
+    /// hours instead of sending it again before each call.</summary>
+    [Fact]
+    public async Task A_preflight_may_be_reused_for_two_hours()
+    {
+        using var factory = new Factory();
+
+        var response = await factory.CreateClient().SendAsync(Preflight("https://feat-x.campuspulse-web.pages.dev"));
+
+        Assert.Equal("7200", response.Headers.GetValues("Access-Control-Max-Age").Single());
     }
 
     private static HttpRequestMessage Preflight(string origin)

@@ -56,6 +56,7 @@ public sealed class PostgresAppFactory : WebApplicationFactory<Program>, IAsyncL
         TestAuth.Configure(builder);
         // No reminder ticks in the background of a test; the reminder tests drive them by hand (TickAsync).
         builder.UseSetting("Reminders:Enabled", "false");
+        TestLimits.Configure(builder);
         builder.ConfigureTestServices(services => PushTesting.UseHandler(services, new NoNetworkHandler()));
     }
 
@@ -66,7 +67,11 @@ public sealed class PostgresAppFactory : WebApplicationFactory<Program>, IAsyncL
         if (ConnectionString is not null)
         {
             NpgsqlConnection.ClearAllPools();
-            await using var db = CreateDbContext();
+            // DROP DATABASE waits for a checkpoint. With many test databases created and dropped at once on a slow
+            // disk (Postgres in Docker Desktop), that took longer than Npgsql's default 30 s command timeout.
+            var options = new DbContextOptionsBuilder<CampusPulseDbContext>();
+            DependencyInjection.Configure(options, new NpgsqlConnectionStringBuilder(ConnectionString) { CommandTimeout = 300 }.ConnectionString);
+            await using var db = new CampusPulseDbContext(options.Options);
             await db.Database.EnsureDeletedAsync();
         }
     }

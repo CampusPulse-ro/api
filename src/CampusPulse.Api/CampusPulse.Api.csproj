@@ -56,6 +56,11 @@
          patched 2.x release. Do NOT jump to 3.x: it makes IOpenApiMediaType.Example read-only
          and the ASP.NET Core 10 XML-comment source generator fails to compile. -->
     <PackageReference Include="Microsoft.OpenApi" Version="2.13.0" />
+    <!-- Metrics (MetricsSetup): the OpenTelemetry SDK, and its Prometheus exporter for ASP.NET Core. The exporter is
+         the only Prometheus one OpenTelemetry ships and is still marked beta (the Prometheus spec it follows isn't
+         final); it is the one Microsoft's ASP.NET Core metrics docs use. Pinned to the release of the SDK. -->
+    <PackageReference Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" Version="1.21.0-beta.1" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.21.0" />
     <PackageReference Include="Serilog.Extensions.Logging" Version="10.0.0" />
     <PackageReference Include="Serilog.Formatting.Compact" Version="3.0.0" />
     <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
