@@ -150,7 +150,7 @@ app.UseResponseCompression();
 app.UseExceptionHandler();
 // A 400 with no body (a request body that couldn't be read: bad JSON, a missing field, an enum
 // value outside the contract) or a 413 (a body over Limits:MaxRequestBodyBytes) gets a ProblemDetails
-// body like every other error. Other empty statuses (401 from the token check, an unknown path's
+// body like every other error, with its own type (invalid-request, body-too-large) for clients to branch on. Other empty statuses (401 from the token check, an unknown path's
 // 404) stay as they are.
 app.UseStatusCodePages(async context =>
 {
@@ -159,12 +159,15 @@ app.UseStatusCodePages(async context =>
     {
         StatusCodes.Status400BadRequest => new Microsoft.AspNetCore.Mvc.ProblemDetails
         {
+            Type = "invalid-request",
             Status = StatusCodes.Status400BadRequest,
             Title = "Bad request",
-            Detail = "The request body is missing, isn't JSON, or doesn't match the contract (/openapi/v1.json).",
+            Detail = "The request doesn't match the contract (/openapi/v1.json): a body that is missing, isn't JSON or lacks a "
+                + "required field, or a parameter of the wrong type.",
         },
         StatusCodes.Status413PayloadTooLarge => new Microsoft.AspNetCore.Mvc.ProblemDetails
         {
+            Type = "body-too-large",
             Status = StatusCodes.Status413PayloadTooLarge,
             Title = "Request body too large",
             Detail = "Request bodies are limited to a few kilobytes: this API only takes small JSON bodies.",

@@ -64,8 +64,8 @@ public sealed class EmailSignInTests(PostgresAppFactory factory) : IClassFixture
     [PostgresTheory]
     [InlineData("""{ "email": "not-an-email", "language": "en" }""", "invalid-email")]
     [InlineData("""{ "email": "Ana <ana@example.com>", "language": "en" }""", "invalid-email")]
-    [InlineData("""{ "email": "ana@example.com" }""", null)]
-    [InlineData("""{ "email": "ana@example.com", "language": "de" }""", null)]
+    [InlineData("""{ "email": "ana@example.com" }""", "invalid-request")]
+    [InlineData("""{ "email": "ana@example.com", "language": "de" }""", "invalid-request")]
     public async Task Start_refuses_what_isnt_an_address_or_a_language(string json, string? type)
     {
         using var app = new AccountsApp(factory);
@@ -100,6 +100,22 @@ public sealed class EmailSignInTests(PostgresAppFactory factory) : IClassFixture
 
         var failed = await app.StartEmail(email);
         app.Email.Refuse = false;
+        var after = await Task.WhenAll(Enumerable.Range(0, 3).Select(_ => app.StartEmail(email)));
+
+        Assert.Equal((HttpStatusCode.ServiceUnavailable, "email-unavailable"), await AccountsApp.Problem(failed));
+        Assert.All(after, r => Assert.Equal(HttpStatusCode.Accepted, r.StatusCode));
+    }
+
+    /// <summary>A sender that throws (not just refuses) is a failed send too: 503, and the code is taken back.</summary>
+    [PostgresFact]
+    public async Task A_sender_that_throws_is_503_and_takes_the_code_back()
+    {
+        using var app = new AccountsApp(factory);
+        var email = AccountsApp.NewEmail();
+        app.Email.Throw = true;
+
+        var failed = await app.StartEmail(email);
+        app.Email.Throw = false;
         var after = await Task.WhenAll(Enumerable.Range(0, 3).Select(_ => app.StartEmail(email)));
 
         Assert.Equal((HttpStatusCode.ServiceUnavailable, "email-unavailable"), await AccountsApp.Problem(failed));

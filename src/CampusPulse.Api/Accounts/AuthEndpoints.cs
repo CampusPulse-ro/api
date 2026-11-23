@@ -118,7 +118,19 @@ public static partial class AuthEndpoints
         // Sent and, when that fails, withdrawn whether or not the client is still waiting: a code issued and counted
         // must not be left behind by a dropped connection. The sender's own timeout bounds it.
         var logger = loggers.CreateLogger(LogCategory);
-        if (!await sender.SendAsync(SignInEmail.Compose(email, code, request.Language), CancellationToken.None))
+        bool sent;
+        try
+        {
+            sent = await sender.SendAsync(SignInEmail.Compose(email, code, request.Language), CancellationToken.None);
+        }
+        catch (Exception e)
+        {
+            // Any sender fault is a failed send: the code is withdrawn below rather than left issued behind a 500.
+            LogSenderFailed(logger, e.GetType().Name);
+            sent = false;
+        }
+
+        if (!sent)
         {
             await WithdrawAsync(db, email, now, replaced, CancellationToken.None);
             LogCodeNotDelivered(logger);
@@ -293,6 +305,9 @@ public static partial class AuthEndpoints
 
     [LoggerMessage(EventId = 100, Level = LogLevel.Information, Message = "Email sign-in code sent")]
     private static partial void LogCodeSent(ILogger logger);
+
+    [LoggerMessage(EventId = 108, Level = LogLevel.Error, Message = "The email sender failed: {Reason}")]
+    private static partial void LogSenderFailed(ILogger logger, string reason);
 
     [LoggerMessage(EventId = 101, Level = LogLevel.Warning, Message = "Email sign-in code not delivered (the code was withdrawn)")]
     private static partial void LogCodeNotDelivered(ILogger logger);

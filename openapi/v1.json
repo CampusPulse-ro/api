@@ -2997,10 +2997,7 @@
         "type": "object",
         "properties": {
           "title": {
-            "type": [
-              "null",
-              "string"
-            ]
+            "type": "string"
           },
           "course": {
             "type": [
@@ -3009,10 +3006,7 @@
             ]
           },
           "dueAt": {
-            "type": [
-              "null",
-              "string"
-            ],
+            "type": "string",
             "format": "date-time"
           },
           "notes": {
@@ -3022,10 +3016,7 @@
             ]
           },
           "done": {
-            "type": [
-              "null",
-              "boolean"
-            ]
+            "type": "boolean"
           }
         }
       },

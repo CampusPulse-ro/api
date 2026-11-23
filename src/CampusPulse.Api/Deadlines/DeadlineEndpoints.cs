@@ -20,19 +20,34 @@ public sealed record DeadlineResponse(Guid Id, string Title, string? Course, Dat
 /// (at most 2000), and when it is due.</summary>
 public sealed record CreateDeadlineRequest(string Title, DateTimeOffset DueAt, string? Course = null, string? Notes = null);
 
-/// <summary>Body of <c>PATCH /me/deadlines/{id}</c>: only the fields to change. A field that is missing or null stays as
-/// it is; an empty <see cref="Course"/> or <see cref="Notes"/> clears it.</summary>
+/// <summary>Body of <c>PATCH /me/deadlines/{id}</c>: only the fields to change; a missing field stays as it is.
+/// <see cref="Title"/>, <see cref="DueAt"/> and <see cref="Done"/> can't be null (400). A null <see cref="Course"/> or
+/// <see cref="Notes"/> stays as it is, and an empty one clears it.</summary>
 public sealed record UpdateDeadlineRequest
 {
-    public string? Title { get; init; }
+    // Which fields the body had: the JSON reader calls an init accessor only for a property it found.
+    private bool titleGiven;
+    private bool dueAtGiven;
+    private bool doneGiven;
+
+    public string Title { get; init { field = value; titleGiven = true; } } = null!;
 
     public string? Course { get; init; }
 
-    public DateTimeOffset? DueAt { get; init; }
+    public DateTimeOffset DueAt { get; init { field = value; dueAtGiven = true; } }
 
     public string? Notes { get; init; }
 
-    public bool? Done { get; init; }
+    public bool Done { get; init { field = value; doneGiven = true; } }
+
+    /// <summary>The body sets <see cref="Title"/> to null.</summary>
+    internal bool NullTitle => titleGiven && Title is null;
+
+    internal string? NewTitle => titleGiven ? Title : null;
+
+    internal DateTimeOffset? NewDueAt => dueAtGiven ? DueAt : null;
+
+    internal bool? NewDone => doneGiven ? Done : null;
 }
 
 /// <summary>
@@ -99,12 +114,13 @@ public static class DeadlineEndpoints
         return TypedResults.Ok(body);
     }
 
-    /// <summary>Adds a deadline: 201. 400 <c>invalid-deadline</c> for a title, course or notes out of bounds; 409
+    /// <summary>Adds a deadline: 201. 400 <c>invalid-deadline</c> for a title, course, notes or due time out of bounds
+    /// (a body without <c>dueAt</c> doesn't match the contract: 400 <c>invalid-request</c>); 409
     /// <c>deadline-limit</c> at <see cref="Deadline.MaxPerUser"/> deadlines.</summary>
     internal static async Task<Results<Created<DeadlineResponse>, ProblemHttpResult>> Create(CreateDeadlineRequest request,
         ClaimsPrincipal principal, CampusPulseDbContext db, TimeProvider time, CancellationToken cancellationToken)
     {
-        if (Deadline.Problem(request.Title, request.Course, request.Notes) is { } problem)
+        if (Deadline.Problem(request.Title, request.Course, request.Notes, request.DueAt) is { } problem)
         {
             return InvalidDeadline(problem);
         }
@@ -150,15 +166,21 @@ public static class DeadlineEndpoints
             return NoDeadline();
         }
 
-        var title = request.Title ?? deadline.Title;
+        if (request.NullTitle)
+        {
+            return InvalidDeadline("title can't be null: leave it out to keep it.");
+        }
+
+        var title = request.NewTitle ?? deadline.Title;
         var course = request.Course ?? deadline.Course;
         var notes = request.Notes ?? deadline.Notes;
-        if (Deadline.Problem(title, course, notes) is { } problem)
+        var dueAt = request.NewDueAt ?? deadline.DueAt;
+        if (Deadline.Problem(title, course, notes, dueAt) is { } problem)
         {
             return InvalidDeadline(problem);
         }
 
-        deadline.Update(title, course, request.DueAt ?? deadline.DueAt, notes, request.Done ?? deadline.Done, time.GetUtcNow());
+        deadline.Update(title, course, dueAt, notes, request.NewDone ?? deadline.Done, time.GetUtcNow());
         try
         {
             await db.SaveChangesAsync(cancellationToken);

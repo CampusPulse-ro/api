@@ -163,11 +163,15 @@ public sealed class RefreshTokenTests
         Assert.True(row.MayRetry(next, T0.AddDays(1).AddSeconds(59)));
         Assert.False(row.MayRetry(next, T0.AddDays(1).AddMinutes(1).AddSeconds(1)));
         Assert.False(row.MayRetry(null, T0.AddDays(1)));
-        var (again, _) = row.Rotate(T0.AddDays(1).AddSeconds(30));
+        var (again, _) = row.Retry(next, T0.AddDays(1).AddSeconds(30));
         Assert.Equal(again.TokenHash, row.ReplacedByHash);
+        // The superseded replacement is revoked and chained to the new token: one live token per family.
+        Assert.Equal((false, again.TokenHash), (next.Usable(T0.AddDays(1).AddSeconds(30)), next.ReplacedByHash));
+        Assert.True(again.Usable(T0.AddDays(1).AddSeconds(30)));
         Assert.False(row.MayRetry(next, T0.AddDays(1).AddSeconds(40)));   // not its replacement any more
         Assert.True(row.MayRetry(again, T0.AddDays(1).AddSeconds(40)));
         Assert.False(row.MayRetry(again, T0.AddDays(1).AddSeconds(61)));  // the window counts from the first replacement
+        Assert.Throws<InvalidOperationException>(() => row.Retry(again, T0.AddDays(1).AddSeconds(61)));
 
         again.Rotate(T0.AddDays(1).AddSeconds(45));                       // the replacement was used
         Assert.False(row.MayRetry(again, T0.AddDays(1).AddSeconds(50)));
@@ -193,14 +197,19 @@ public sealed class DeadlineTests
     [InlineData("   ", null, null)]
     [InlineData(null, null, null)]
     public void A_title_is_required(string? title, string? course, string? notes) =>
-        Assert.NotNull(Deadline.Problem(title, course, notes));
+        Assert.NotNull(Deadline.Problem(title, course, notes, T0));
 
     [Fact]
     public void Limits_are_200_200_and_2000()
     {
-        Assert.Null(Deadline.Problem(new string('t', 200), new string('c', 200), new string('n', 2000)));
-        Assert.NotNull(Deadline.Problem(new string('t', 201), null, null));
-        Assert.NotNull(Deadline.Problem("t", new string('c', 201), null));
-        Assert.NotNull(Deadline.Problem("t", null, new string('n', 2001)));
+        Assert.Null(Deadline.Problem(new string('t', 200), new string('c', 200), new string('n', 2000), T0));
+        Assert.NotNull(Deadline.Problem(new string('t', 201), null, null, T0));
+        Assert.NotNull(Deadline.Problem("t", new string('c', 201), null, T0));
+        Assert.NotNull(Deadline.Problem("t", null, new string('n', 2001), T0));
+        Assert.Null(Deadline.Problem("t", null, null, Deadline.EarliestDue));
+        Assert.NotNull(Deadline.Problem("t", null, null, default));
+        Assert.NotNull(Deadline.Problem("t", null, null, Deadline.EarliestDue.AddTicks(-1)));
+        Assert.NotNull(Deadline.Problem("t", null, null, Deadline.LatestDue));
+        Assert.Throws<ArgumentException>(() => new Deadline(Guid.NewGuid(), "t", null, default, null, T0));
     }
 }

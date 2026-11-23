@@ -161,7 +161,8 @@ public static class SignIn
     /// <see cref="RefreshToken.RetryWindow"/> ago and its replacement is unused (<see cref="RefreshToken.MayRetry"/>): the
     /// client never got that answer, or sent two refreshes at once, and gets new tokens again. The account's row and then
     /// the token's are locked, in the order <c>DELETE /me</c> locks them (so the two can't deadlock), and two refreshes of
-    /// one token run one after the other.</summary>
+    /// one token run one after the other. A retry revokes the replacement it supersedes (<see cref="RefreshToken.Retry"/>),
+    /// so a family never has two live tokens.</summary>
     public static async Task<(RefreshResult Result, TokenResponse? Response)> RefreshAsync(CampusPulseDbContext db, CampusPulseTokens tokens,
         string presented, DateTimeOffset now, CancellationToken cancellationToken)
     {
@@ -183,6 +184,8 @@ public static class SignIn
             return (RefreshResult.Invalid, null);
         }
 
+        RefreshToken next;
+        string refreshToken;
         if (row.ReplacedByHash is not null)
         {
             var replacement = await db.RefreshTokens.SingleOrDefaultAsync(t => t.TokenHash == row.ReplacedByHash, cancellationToken);
@@ -192,13 +195,18 @@ public static class SignIn
                 await transaction.CommitAsync(cancellationToken);
                 return (RefreshResult.Reused, null);
             }
+
+            (next, refreshToken) = row.Retry(replacement!, now);
         }
         else if (!row.Usable(now))
         {
             return (RefreshResult.Invalid, null);
         }
+        else
+        {
+            (next, refreshToken) = row.Rotate(now);
+        }
 
-        var (next, refreshToken) = row.Rotate(now);
         db.RefreshTokens.Add(next);
         user.Seen(null, now);
         await db.SaveChangesAsync(cancellationToken);
@@ -223,6 +231,10 @@ public static class SignIn
         db.RefreshTokens.Where(t => t.FamilyId == familyId && t.RevokedAt == null)
             .ExecuteUpdateAsync(set => set.SetProperty(t => t.RevokedAt, now), cancellationToken);
 
-    internal static bool IsUniqueViolation(DbUpdateException e) =>
-        e.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation };
+    internal static bool IsUniqueViolation(DbUpdateException e) => UniqueViolation(e) is not null;
+
+    /// <summary>The unique constraint or index <paramref name="e"/> broke, or null when it isn't a unique
+    /// violation.</summary>
+    internal static string? UniqueViolation(DbUpdateException e) =>
+        e.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation } p ? p.ConstraintName ?? "" : null;
 }

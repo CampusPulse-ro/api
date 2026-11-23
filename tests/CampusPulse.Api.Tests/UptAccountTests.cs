@@ -292,4 +292,80 @@ public sealed class UptAccountTests(PostgresAppFactory factory) : IClassFixture<
         Assert.Single(results, r => r.IsNew);
         Assert.Single(results.Select(r => r.User.Id).Distinct());
     }
+
+    /// <summary>Another account takes the address while UPT is being linked (forced here with a trigger that does so
+    /// inside the link's own update): UPT is still linked, without the email, instead of a 409 that blames the UPT
+    /// account.</summary>
+    [PostgresFact]
+    public async Task An_address_taken_while_linking_links_UPT_without_it()
+    {
+        using var app = new AccountsApp(factory);
+        var oid = NewOid();
+        var email = $"{oid}@student.upt.ro";
+        var account = await app.SignInWithUpt(NewOid(), email: null);
+        var name = "test_take_" + Guid.NewGuid().ToString("N");
+        await using var db = factory.CreateDbContext();
+        var setup = $"""
+            DELETE FROM user_identities WHERE user_id = '{account.User.Id}';
+            UPDATE users SET entra_object_id = NULL WHERE id = '{account.User.Id}';
+            CREATE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+              IF NEW.verified_email = '{email}' AND OLD.verified_email IS NULL THEN
+                INSERT INTO users (id, email, verified_email, display_name, created_at, last_seen_at)
+                VALUES ('{Guid.NewGuid()}', NEW.verified_email, NEW.verified_email, 'Someone else', now(), now());
+              END IF;
+              RETURN NEW;
+            END $$;
+            CREATE TRIGGER {name} BEFORE UPDATE ON users FOR EACH ROW EXECUTE FUNCTION {name}();
+            """;
+        await db.Database.ExecuteSqlRawAsync(setup);
+        try
+        {
+            var linked = await app.Post("/me/identities/upt-microsoft", new { accessToken = TestAuth.Token(oid: oid) }, account.AccessToken);
+
+            Assert.Equal(HttpStatusCode.OK, linked.StatusCode);
+            var me = await linked.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal((JsonValueKind.Null, true), (me.GetProperty("email").ValueKind, me.GetProperty("uptLinked").GetBoolean()));
+        }
+        finally
+        {
+            var teardown = $"DROP TRIGGER {name} ON users; DROP FUNCTION {name}();";
+            await db.Database.ExecuteSqlRawAsync(teardown);
+        }
+    }
+
+    /// <summary>Another UPT account gets linked to this account while this one is being linked (forced with a trigger):
+    /// that is <c>already-linked</c>, not <c>identity-in-use</c>.</summary>
+    [PostgresFact]
+    public async Task A_UPT_account_linked_meanwhile_is_already_linked()
+    {
+        using var app = new AccountsApp(factory);
+        var oid = NewOid();
+        var account = await app.SignInByEmail(AccountsApp.NewEmail());
+        var name = "test_link_" + Guid.NewGuid().ToString("N");
+        await using var db = factory.CreateDbContext();
+        var setup = $"""
+            CREATE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+              IF NEW.subject = '{oid}' THEN
+                INSERT INTO user_identities (provider, subject, user_id, email, linked_at)
+                VALUES ('upt-microsoft', '{oid}-other', NEW.user_id, NULL, now());
+              END IF;
+              RETURN NEW;
+            END $$;
+            CREATE TRIGGER {name} BEFORE INSERT ON user_identities FOR EACH ROW EXECUTE FUNCTION {name}();
+            """;
+        await db.Database.ExecuteSqlRawAsync(setup);
+        try
+        {
+            var linked = await app.Post("/me/identities/upt-microsoft", new { accessToken = TestAuth.Token(oid: oid) }, account.AccessToken);
+
+            Assert.Equal((HttpStatusCode.Conflict, "already-linked"), await AccountsApp.Problem(linked));
+        }
+        finally
+        {
+            var teardown = $"DROP TRIGGER {name} ON user_identities; DROP FUNCTION {name}();";
+            await db.Database.ExecuteSqlRawAsync(teardown);
+        }
+    }
 }
