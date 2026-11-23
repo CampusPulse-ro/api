@@ -35,6 +35,13 @@ Environment variables only:
 | `HTTPS_PROXY`, `NO_PROXY` | on the Pi, the egress proxy the API reaches Microsoft and Expo through (see Sign-in, Push notifications) |
 | `Push__Expo__AccessToken` | optional: an Expo access token, sent as `Authorization: Bearer` to Expo's push API. Needed only once "enhanced security for push notifications" is turned on for the Expo project |
 | `Reminders__Enabled` | `false` stops sending class reminders (see [Class reminders](#class-reminders)); default `true`. The tests turn it off |
+| `RateLimits__Enabled` | `false` turns the rate limits off (load tests, an emergency); default `true`. See [Rate limits](#rate-limits) |
+| `RateLimits__<bucket>__Burst`, `RateLimits__<bucket>__PerMinute` | the token buckets: `SignedIn` (per student) and `Anonymous` (per client IP) 100 / 100, `Writes` 30 / 30, `Account` (`POST`/`DELETE /me`) 10 / 1. A value below 1 fails the start |
+| `TimetableCache__VersionCheckSeconds` | how often, at most, the cached timetable asks the database whether an import ran; default `10` (see [Timetable cache](#timetable-cache)) |
+| `Limits__MaxRequestBodyBytes` | the largest request body Kestrel takes; default `16384` (16 KiB). Larger is a 413 ProblemDetails |
+| `Limits__RequestTimeoutSeconds` | a request running longer is cancelled and answered 504 ProblemDetails; default `30` |
+| `Database__MaxPoolSize`, `Database__MinPoolSize` | the Npgsql connection pool of one process; default `20` and `0`. They win over pool sizes in the connection string |
+| `Metrics__Port` | serve [metrics](#metrics) on `127.0.0.1:<port>`. Unset (the default): no metrics |
 
 ## Sign-in
 
@@ -162,7 +169,9 @@ clients follow `main`.
   a body record must be present (`RespectRequiredConstructorParameters`) and an enum is accepted only
   by name, never as a number. A body that can't be read is a **400** ProblemDetails (an empty 400 gets
   one from `UseStatusCodePages`), in every environment.
-- Declare every response (`.Produces<T>()`, `.Produces<T>(503)`) so clients get a type for it.
+- Declare every response (`.Produces<T>()`, `.Produces<T>(503)`) so clients get a type for it. Two are added for
+  you: a **429** ProblemDetails on every operation (the rate limits, mapped through the group in `Program.cs`), and a
+  **304** on the GETs that opt into conditional requests (`.WithHttpCaching(...)`, see [HTTP caching](#http-caching)).
 
 ## Data
 
@@ -226,7 +235,8 @@ Every endpoint needs sign-in, and the first and last need an account (404 like `
   body, not the path, because paths are logged here and by the reverse proxy, and push tokens never
   are.
 - `POST /me/notifications/test`: sends "CampusPulse test notification" to the student's devices and
-  answers `{ sent }`, the number the push service accepted it for. Once a minute per student:
+  answers `{ sent }`, the number the push service accepted it for. Once a minute per student (on top of the
+  general [rate limits](#rate-limits)):
   **429** with `Retry-After` otherwise. Only a send that reached the push service counts, so after
   `sent: 0` with no devices, or a 502, the next tap sends right away. The limit is kept **in
   memory**: a restart forgets it, each API instance would count on its own, and an entry is dropped
@@ -289,7 +299,8 @@ endpoints need sign-in and an account (404 like `GET /me` otherwise).
 
 **When:** `ClassReminderSender` ticks once a minute. For every student with a lead and at least one device it
 takes their classes of today and tomorrow, computed exactly as `GET /me/timetable` computes them
-(`ClassSchedule`, so nothing on a non-teaching day or in a break). A class's reminder is due from its start
+(`TimetableSnapshot.ForStudent`, from the same [timetable cache](#timetable-cache), so nothing on a non-teaching day
+or in a break). A class's reminder is due from its start
 (Romanian time) minus the lead until the class starts, and goes out at the first tick in that span. A class that
 has started gets none. Whether a reminder went out is recorded in the database, not in the process, so a skipped
 tick, a restart or a deploy sends the ones still before their class, late, with the minutes actually left. The
@@ -326,7 +337,8 @@ The AC faculty's timetable for a semester (CampusPulse-ro/api#5), loaded by a on
 [docs/timetable-import.md](docs/timetable-import.md). Every endpoint needs sign-in: the faculty shares
 these files with UPT accounts only. Dates are Romanian dates. The API expands the weekly slots into
 dates itself (teaching weeks, the break, non-teaching days, each slot's weeks), so no client handles
-week parity.
+week parity. What is the same for everyone comes from memory and is reloaded after an import (see
+[Timetable cache](#timetable-cache)); answers carry an `ETag` (see [HTTP caching](#http-caching)).
 
 - `GET /semesters/current`: the teaching weeks with their dates, non-teaching days (`reason`), the breaks
   (`from`, `to`, `name`, null when unnamed), today and its teaching week. Calendar names come as `{ ro, en }`:
@@ -417,6 +429,141 @@ dotnet ef migrations add <Name> --project src/CampusPulse.Infrastructure --start
   Look one request up with `sudo grep -h '"RequestId":"<id>"' /srv/campuspulse/logs/stage/api*.log | jq`.
 - **Error reporting (Sentry):** not enabled. `Program.cs` marks where it would go; it would also need
   an allow rule in the Pi's network guard.
+
+## Scaling and limits
+
+What keeps the API fast and hard to abuse (CampusPulse-ro/api#58). Each part has tests; the numbers at the end were
+measured.
+
+### Behind nginx
+
+nginx terminates TLS and proxies to the API on 127.0.0.1, so every connection comes from nginx. The API takes the
+client's address and scheme from nginx's `X-Forwarded-For` and `X-Forwarded-Proto` (`ForwardedHeaders`), only from a
+loopback proxy and only nginx's own hop: a client can't choose the address it is counted under, and the header from
+anywhere else is ignored (`ProxyHeaders`).
+
+### Rate limits
+
+ASP.NET Core's rate limiter with token buckets in memory (`RateLimitSetup`). A bucket holds *Burst* requests and gets
+*PerMinute* back a minute, one at a time:
+
+| Bucket | Counted per | Burst / per minute | Takes from |
+|---|---|---|---|
+| `SignedIn` | student (the token's `oid`) | 100 / 100 | every request with a valid token |
+| `Anonymous` | client IP (an IPv6 address by its /64) | 100 / 100 | every request without one: health checks, the contract, refused tokens |
+| `Writes` | student, else IP | 30 / 30 | every POST, PUT, PATCH, DELETE, as well |
+| `Account` | student | 10 / 1 | `POST /me` and `DELETE /me`, as well |
+
+- A refused request is a **429** ProblemDetails with `Retry-After` (seconds), which browsers can read (CORS exposes it).
+  Clients wait that long before retrying.
+- An invalid token counts as anonymous, so made-up `oid`s can't open buckets of their own. Writes are limited by
+  method, so a new endpoint is covered without anyone remembering to.
+- Logged as counts only, once a minute when there were any: `Rate limits refused 37 requests in the last minute (30
+  signed in, 7 anonymous)`. Per route and per bucket they are in the [metrics](#metrics).
+- The test notification keeps its own once-a-minute limit (see [Push notifications](#push-notifications)).
+- **Limits:** the buckets live in one process. A restart empties them, and two instances would each count on their
+  own: several instances need a shared store (Redis).
+
+### Timetable cache
+
+The timetable is the same for every student and changes only when `import-timetable` runs. `TimetableCache` keeps it
+in memory as one read-only `TimetableSnapshot`: semesters and their calendars, programmes and groups, **each group's
+weekly schedule** (its slots with subject, room and semester resolved), the choices of each year and each room's
+classes. A request only turns weeks into dates.
+
+- **Invalidation:** the snapshot is labelled with the newest `timetable_import_runs` id. An import is a separate
+  process, but it writes its runs in the transaction that writes the timetable, so a new id means new data. The cache
+  asks for the id at most every `TimetableCache__VersionCheckSeconds` (10 s; one indexed query) and loads the snapshot
+  again when it changed: nine queries in one REPEATABLE READ transaction, so the data and its label come from the same
+  database snapshot.
+- After an import every instance serves it within 10 s. A read that looks for something the snapshot lacks (a new
+  group's id from a client, the group a student just picked) checks at once, so new data is never missed; only
+  changed data can be up to 10 s old.
+- One check or load runs at a time: requests that arrive meanwhile wait for it instead of each querying the database
+  (no stampede).
+- `GET /me/timetable` is **one query** (the student's account, group and choices, joined) plus the cached group
+  schedule. The class reminders use the same snapshot. **Per-student data is never cached on the server**: a change
+  shows on the next request.
+- It holds every imported semester (today one: 129 groups, 743 slots).
+
+### HTTP caching
+
+- Every timetable and `/me` GET answers a weak `ETag` (a hash of its JSON) and **304 Not Modified**, with no body, to a
+  matching `If-None-Match` (`HttpCaching`).
+- Shared data (`/semesters/current`, `/timetable/…`, `/rooms…`): `Cache-Control: private, max-age=60`. It is the same
+  for everyone but needs sign-in, so it is never `public`: no shared cache (a CDN, a proxy) may keep it.
+- A student's own data (`/me…`): `private, no-cache`, so the browser asks every time (and gets a 304 when nothing
+  changed) and never shows a change late.
+- Everything else (writes, errors, health): `no-store`.
+
+### Compression
+
+Brotli or gzip, at the fastest level, when the client accepts it. nginx's `gzip` covers only HTML (its default
+`gzip_types`), so the API compresses its own JSON. On for HTTPS: BREACH needs a page that makes the browser send
+credentialed requests mixing attacker input with a secret, and this API takes bearer tokens only, never cookies.
+
+### Security headers and request limits
+
+- On every response, errors included (`SecurityHeaders`): `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+  `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`, `Referrer-Policy: no-referrer`, and
+  `Cache-Control: no-store` unless the endpoint sets its own. HSTS (one year) on HTTPS. No `Server` header.
+- Request bodies up to `Limits__MaxRequestBodyBytes` (16 KiB; the largest real body is a push token, ~100 bytes),
+  enforced by Kestrel: larger is a **413** ProblemDetails.
+- A request running longer than `Limits__RequestTimeoutSeconds` (30 s) is cancelled and answered **504**
+  ProblemDetails, so a request stuck on the database frees its connection. 30 s leaves room for the first request
+  after a start (EF Core compiles its queries then) and for the test notification's 15 s push timeout.
+- CORS allows only `Cors__AllowedOrigins__<n>`. Checked on the Pi (2026-11-23): prod `https://campuspulse.thorsp.net`
+  and `https://campuspulse-web.pages.dev`; stage the staging and preview Pages sites and the local dev servers
+  (`localhost:5173`, `:8081`). Browsers may reuse a preflight for 2 hours (`Access-Control-Max-Age`): every call carries
+  `Authorization`, so every call would otherwise need an `OPTIONS` first.
+
+### Database
+
+- **Indexes:** every query behind `/me/timetable`, the settings, the reminder sender and the rooms has an index path,
+  checked with `EXPLAIN` on the stage database (with sequential scans off, since its tables are a few pages and the
+  planner rightly reads them whole). The one gap was the cache's own version query, which now has
+  `ix_timetable_import_runs_imported_at_id` (read backwards: one entry).
+- Read paths use `AsNoTracking` (no change-tracking snapshots for rows that are only read).
+- **Pool:** at most `Database__MaxPoolSize` (20) connections per process instead of Npgsql's 100. Stage and prod share
+  one Postgres with `max_connections = 100`, so a spike in both still leaves room for migrations, backups and psql. A
+  request that finds all 20 busy waits for one (up to the connection string's `Timeout`).
+
+### Metrics
+
+OpenTelemetry metrics in Prometheus text format at `/metrics`, served **only** on a separate listener the API binds to
+`127.0.0.1:<Metrics__Port>` itself, and only to loopback clients (`MetricsSetup`). nginx proxies the API's own port,
+which has no `/metrics`; every other path on the metrics port is a 404. Off unless `Metrics__Port` is set.
+
+- `http_server_request_duration_seconds` (request rate, latency and status per route), `aspnetcore_rate_limiting_requests_total`
+  (429s by `aspnetcore_rate_limiting_result`), `campuspulse_timetable_cache_lookups_total{result="hit"|"miss"}` and
+  `campuspulse_timetable_cache_load_duration_seconds`, `db_client_connection_count{db_client_connection_state="used"|"idle"}`
+  and `db_client_connection_max` (the Npgsql pool; labelled with the connection string without its password),
+  `db_client_operation_duration_seconds` (query time), `kestrel_*`, `http_client_*` (Microsoft sign-in, Expo),
+  `dotnet_*` (GC, memory, thread pool).
+- Read them on the Pi: `curl -s http://127.0.0.1:9093/metrics` (stage, once its env file sets `Metrics__Port=9093`).
+
+### Measured
+
+On ThorSPB (laptop, x64), API in Release on Kestrel against Postgres 18 in Docker with stage's timetable (743 slots,
+129 groups, 78 rooms), signed in as one student whose group has 17 classes that week. Sign-in as in the tests (a local
+signing key), rate limits off for throughput, logging at Warning. `oha`, 16 connections, 5 s warm-up, then 20 s. Before:
+`main` at fc5ba5f. These are relative numbers; the Pi is slower.
+
+| Endpoint | Before: requests/s | p95 | After: requests/s | p95 |
+|---|---|---|---|---|
+| `GET /timetable/programmes` | 835 | 23.8 ms | 13,142 | 2.0 ms |
+| `GET /timetable/groups/{id}` (a week) | 411 | 46.9 ms | 13,596 | 2.1 ms |
+| `GET /me/timetable` (a week) | 333 | 60.5 ms | 2,162 | 11.2 ms |
+| `GET /rooms` | 3,829 | 6.5 ms | 19,505 | 1.5 ms |
+| `GET /health` (no database) | 37,442 | 0.8 ms | 29,823 | 1.0 ms |
+
+- **Cold vs cached:** loading the snapshot takes 370 ms in a fresh process (query compilation included) and 74 ms
+  after an import in a warm one; the first request after an import took 80 ms, the next ones ~2 ms.
+- **Compression** (Brotli): `/timetable/programmes` 21.2 KB → 3.2 KB, `/me/timetable` a week 7.3 KB → 1.4 KB and 31
+  days 29.6 KB → 2.2 KB, `/rooms` 4.8 KB → 0.5 KB.
+- **Limits** (defaults): one student calling `/me/timetable` as fast as 4 connections allow for 10 s got 115 answers
+  (the burst of 100 plus the refill) and 74,571 429s; refusing costs no database work (p95 0.6 ms).
+- `/health` is ~0.1 ms slower per request: the new middleware (forwarded headers, security headers, compression).
 
 ## Tests
 

@@ -282,6 +282,9 @@ public sealed class CampusPulseDbContext(DbContextOptions<CampusPulseDbContext> 
             run.Property(r => r.OverridesSha256).HasMaxLength(64).IsFixedLength().IsRequired();
             run.Property(r => r.Summary).IsRequired();
             run.HasIndex(r => new { r.SemesterId, r.Source, r.ImportedAt });
+            // The timetable cache's version: the newest run (ORDER BY imported_at DESC, id DESC LIMIT 1), read every
+            // few seconds by every API instance; read backwards, this index answers it with one entry.
+            run.HasIndex(r => new { r.ImportedAt, r.Id });
         });
 
         modelBuilder.Entity<StudentSettings>(settings =>

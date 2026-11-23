@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using CampusPulse.Api.Http;
 using CampusPulse.Api.Users;
 using CampusPulse.Domain.Reminders;
 using CampusPulse.Infrastructure;
@@ -25,6 +26,7 @@ public static class ReminderEndpoints
         app.MapGet("/me/reminders", GetReminders)
             .RequireAuthorization()
             .WithName("GetReminderSettings")
+            .WithHttpCaching(HttpCacheScope.PerStudent)
             .WithTags("Reminders")
             .ProducesProblem(StatusCodes.Status404NotFound)
             .Produces(StatusCodes.Status401Unauthorized);

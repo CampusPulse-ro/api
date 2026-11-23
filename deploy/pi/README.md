@@ -123,6 +123,20 @@ client sent. The app returns it and puts it on every log line; nginx logs it as 
 `/var/log/nginx/campuspulse.access.log` ([`nginx-campuspulse-request-id.conf`](nginx-campuspulse-request-id.conf)),
 so a request can be followed from nginx into the app's logs.
 
+## Metrics
+
+The API can serve Prometheus metrics on a loopback-only listener of its own (main README, *Metrics*). Not on yet. To
+turn it on, add to the environment's env file and restart the service (no unit change: the API binds
+`127.0.0.1:<port>` itself, next to `ASPNETCORE_URLS`):
+
+```bash
+Metrics__Port=9092   # prod; stage: 9093
+```
+
+then `curl -s http://127.0.0.1:9093/metrics` on the Pi. nginx proxies only 5092/5093, so the metrics port is never
+public, and the API answers it only to loopback clients. The network guard needs nothing: the app only answers that
+connection.
+
 ## One-time setup (already done; for a new machine)
 
 - Users `campuspulse-stage` and `campuspulse-prod` (system, no shell, no home).

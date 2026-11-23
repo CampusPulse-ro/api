@@ -32,14 +32,15 @@ public sealed record ClassReminderTick(int Due, int Sent, int AlreadySent, int R
 /// <summary>
 /// Sends class reminders (CampusPulse-ro/api#53). Once a minute, for every student with a reminder setting and at
 /// least one device, it takes their classes, computed exactly as <c>GET /me/timetable</c> computes them
-/// (<see cref="ClassSchedule"/>). A class's reminder is due from its start (Romanian time) minus the student's lead
-/// until it starts, and goes out once: one push, on every device. Whether it went out is recorded in
+/// (<see cref="TimetableSnapshot.ForStudent"/>, from the same <see cref="TimetableCache"/>). A class's reminder is
+/// due from its start (Romanian time) minus the student's lead until it starts, and goes out once: one push, on every
+/// device. Whether it went out is recorded in
 /// <c>class_reminders_sent</c>, not in this process, so a skipped tick, a restart or a deploy neither repeats nor
 /// misses one, and a class that has started gets none. Records older than <see cref="KeepSent"/> are deleted here.
 /// Logs counts only.
 /// </summary>
 public sealed partial class ClassReminderSender(IServiceScopeFactory scopes, TimeProvider time, IOptions<ReminderOptions> options,
-    ILogger<ClassReminderSender> logger) : BackgroundService
+    TimetableCache timetableCache, ILogger<ClassReminderSender> logger) : BackgroundService
 {
     public const string ReminderType = "classReminder";
 
@@ -116,7 +117,7 @@ public sealed partial class ClassReminderSender(IServiceScopeFactory scopes, Tim
         var keepFrom = now - KeepSent;
         await db.SentClassReminders.Where(r => r.SentAt < keepFrom).ExecuteDeleteAsync(cancellationToken);
 
-        var leads = await db.ReminderSettings
+        var leads = await db.ReminderSettings.AsNoTracking()
             .Where(r => db.PushDevices.Any(d => d.UserId == r.UserId))
             .ToDictionaryAsync(r => r.UserId, r => TimeSpan.FromMinutes(r.MinutesBefore), cancellationToken);
         if (leads.Count == 0)
@@ -127,13 +128,13 @@ public sealed partial class ClassReminderSender(IServiceScopeFactory scopes, Tim
         // A due class starts within the hour: today or, late in the evening, tomorrow (Romanian dates).
         var (firstDay, lastDay) = (RomanianTime.DateOf(now), RomanianTime.DateOf(now + MaxLead));
         var students = await StudentTimetableChoices.LoadAsync(db, [.. leads.Keys], cancellationToken);
-        var schedule = await ClassSchedule.ForStudentsAsync(db, students, firstDay, lastDay, cancellationToken);
+        var timetable = await timetableCache.GetAsync(cancellationToken);
         var inWindow = new List<Due>();
         foreach (var student in students)
         {
             // One reminder per subject and start: a grid class and a picked offer of the same subject at the same
             // time are one class to the student.
-            foreach (var occurrence in schedule.ForStudent(student, firstDay, lastDay).DistinctBy(o => (o.Date, o.StartsAt, o.SubjectId)))
+            foreach (var occurrence in timetable.ForStudent(student, firstDay, lastDay).DistinctBy(o => (o.Date, o.StartsAt, o.SubjectId)))
             {
                 var startsAt = RomanianTime.Instant(occurrence.Date, occurrence.StartsAt);
                 if (IsDue(startsAt, leads[student.UserId], now))
@@ -154,7 +155,7 @@ public sealed partial class ClassReminderSender(IServiceScopeFactory scopes, Tim
                 .Select(r => new Key(r.UserId, r.Date, r.StartsAt, r.SubjectId))
                 .ToListAsync(cancellationToken))
             .ToHashSet();
-        var devices = (await db.PushDevices.Where(d => users.Contains(d.UserId)).ToListAsync(cancellationToken)).ToLookup(d => d.UserId);
+        var devices = (await db.PushDevices.AsNoTracking().Where(d => users.Contains(d.UserId)).ToListAsync(cancellationToken)).ToLookup(d => d.UserId);
         var due = inWindow.Where(d => !sentBefore.Contains(d.Key) && devices[d.UserId].Any()).ToList();
         if (due.Count == 0)
         {

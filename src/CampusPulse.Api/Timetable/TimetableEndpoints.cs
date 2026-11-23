@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using CampusPulse.Api.Http;
 using CampusPulse.Api.Users;
 using CampusPulse.Domain.Timetable;
 using CampusPulse.Domain.Users;
@@ -34,7 +35,11 @@ public sealed record SemesterResponse(
     DateOnly Today,
     int? TodayWeek);
 
-public sealed record StudyGroupResponse(Guid Id, string ProgrammeCode, string ProgrammeName, int Year, string Series, string Label);
+public sealed record StudyGroupResponse(Guid Id, string ProgrammeCode, string ProgrammeName, int Year, string Series, string Label)
+{
+    public static StudyGroupResponse Of(StudyGroup group, Programme programme) =>
+        new(group.Id, programme.Code, programme.Name, group.Year, group.Series, group.Label);
+}
 
 public sealed record ProgrammeYearResponse(int Year, IReadOnlyList<StudyGroupResponse> Groups);
 
@@ -106,7 +111,10 @@ public sealed record StudentSubjectResponse(Guid SubjectId, string Name, string?
 /// <summary>Body of <c>PUT /me/subjects/{subjectId}</c>: the offered slot picked, or null for none yet.</summary>
 public sealed record PickSubjectRequest(Guid? OfferedSlotId);
 
-public sealed record RoomResponse(string Code, string? Building, string? Floor, int? Capacity);
+public sealed record RoomResponse(string Code, string? Building, string? Floor, int? Capacity)
+{
+    public static RoomResponse Of(Room room) => new(room.Code, room.Building, room.Floor, room.Capacity);
+}
 
 /// <summary>A class or offered slot in a room. <see cref="CampusVirtualUrl"/>: the subject's course page on
 /// Campus Virtual, null when it has none we know of.</summary>
@@ -130,6 +138,14 @@ public static class TimetableEndpoints
 {
     public const int MaxRangeDays = 31;
 
+    /// <summary>The timetable cache (<see cref="TimetableCache"/>) and its <c>TimetableCache</c> options.</summary>
+    public static IServiceCollection AddCampusPulseTimetable(this IServiceCollection services, IConfiguration configuration)
+    {
+        services.Configure<TimetableCacheOptions>(configuration.GetSection(TimetableCacheOptions.Section));
+        services.AddSingleton<TimetableCache>();
+        return services;
+    }
+
     public static IEndpointRouteBuilder MapTimetable(this IEndpointRouteBuilder app)
     {
         RomanianTime.EnsureAvailable();
@@ -137,27 +153,32 @@ public static class TimetableEndpoints
 
         timetable.MapGet("/semesters/current", GetCurrentSemester)
             .WithName("GetCurrentSemester")
+            .WithHttpCaching(HttpCacheScope.Shared)
             .ProducesProblem(StatusCodes.Status404NotFound)
             .Produces(StatusCodes.Status401Unauthorized);
 
         timetable.MapGet("/timetable/programmes", GetProgrammes)
             .WithName("GetProgrammes")
+            .WithHttpCaching(HttpCacheScope.Shared)
             .ProducesProblem(StatusCodes.Status404NotFound)
             .Produces(StatusCodes.Status401Unauthorized);
 
         timetable.MapGet("/timetable/groups/{id:guid}", GetGroupTimetable)
             .WithName("GetGroupTimetable")
+            .WithHttpCaching(HttpCacheScope.Shared)
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status404NotFound)
             .Produces(StatusCodes.Status401Unauthorized);
 
         timetable.MapGet("/timetable/groups/{id:guid}/choices", GetGroupChoices)
             .WithName("GetGroupChoices")
+            .WithHttpCaching(HttpCacheScope.Shared)
             .ProducesProblem(StatusCodes.Status404NotFound)
             .Produces(StatusCodes.Status401Unauthorized);
 
         timetable.MapGet("/me/settings", GetSettings)
             .WithName("GetStudentSettings")
+            .WithHttpCaching(HttpCacheScope.PerStudent)
             .ProducesProblem(StatusCodes.Status404NotFound)
             .Produces(StatusCodes.Status401Unauthorized);
 
@@ -169,6 +190,7 @@ public static class TimetableEndpoints
 
         timetable.MapGet("/me/subjects", GetSubjects)
             .WithName("GetStudentSubjects")
+            .WithHttpCaching(HttpCacheScope.PerStudent)
             .ProducesProblem(StatusCodes.Status404NotFound)
             .Produces(StatusCodes.Status401Unauthorized);
 
@@ -185,16 +207,19 @@ public static class TimetableEndpoints
 
         timetable.MapGet("/me/timetable", GetMyTimetable)
             .WithName("GetMyTimetable")
+            .WithHttpCaching(HttpCacheScope.PerStudent)
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status404NotFound)
             .Produces(StatusCodes.Status401Unauthorized);
 
         timetable.MapGet("/rooms", GetRooms)
             .WithName("GetRooms")
+            .WithHttpCaching(HttpCacheScope.Shared)
             .Produces(StatusCodes.Status401Unauthorized);
 
         timetable.MapGet("/rooms/{code}/timetable", GetRoomTimetable)
             .WithName("GetRoomTimetable")
+            .WithHttpCaching(HttpCacheScope.Shared)
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status404NotFound)
             .Produces(StatusCodes.Status401Unauthorized);
@@ -203,12 +228,12 @@ public static class TimetableEndpoints
     }
 
     /// <summary>The semester that contains today, else the next one to start, else the last one.</summary>
-    internal static async Task<Results<Ok<SemesterResponse>, ProblemHttpResult>> GetCurrentSemester(CampusPulseDbContext db,
+    internal static async Task<Results<Ok<SemesterResponse>, ProblemHttpResult>> GetCurrentSemester(TimetableCache cache,
         TimeProvider time, CancellationToken cancellationToken)
     {
         var today = Today(time);
-        var semester = await CurrentSemesterAsync(db, today, cancellationToken);
-        if (semester is null)
+        var timetable = await cache.GetAsync(t => t.CurrentSemester(today) is not null, cancellationToken);
+        if (timetable.CurrentSemester(today) is not { } semester)
         {
             return NoTimetable();
         }
@@ -222,28 +247,17 @@ public static class TimetableEndpoints
 
     /// <summary>The current semester's programmes, their years and study groups: what a student picks
     /// their group from.</summary>
-    internal static async Task<Results<Ok<IReadOnlyList<ProgrammeResponse>>, ProblemHttpResult>> GetProgrammes(CampusPulseDbContext db,
+    internal static async Task<Results<Ok<IReadOnlyList<ProgrammeResponse>>, ProblemHttpResult>> GetProgrammes(TimetableCache cache,
         TimeProvider time, CancellationToken cancellationToken)
     {
-        var semester = await CurrentSemesterAsync(db, Today(time), cancellationToken);
-        if (semester is null)
-        {
-            return NoTimetable();
-        }
-
-        var groups = await db.StudyGroups.Where(g => g.SemesterId == semester.Id && g.RetiredAt == null).ToListAsync(cancellationToken);
-        var programmeIds = groups.Select(g => g.ProgrammeId).Distinct().ToList();
-        var programmes = await db.Programmes.Where(p => programmeIds.Contains(p.Id)).ToListAsync(cancellationToken);
-        IReadOnlyList<ProgrammeResponse> body = [.. programmes.OrderBy(p => p.Code, StringComparer.Ordinal).Select(p => new ProgrammeResponse(
-            p.Code, p.Name,
-            [.. groups.Where(g => g.ProgrammeId == p.Id).GroupBy(g => g.Year).OrderBy(y => y.Key).Select(y => new ProgrammeYearResponse(y.Key,
-                [.. y.OrderBy(g => g.Series, StringComparer.Ordinal).ThenBy(g => g.Group).ThenBy(g => g.Subgroup).Select(g => GroupResponse(g, p))]))]))];
-        return TypedResults.Ok(body);
+        var today = Today(time);
+        var timetable = await cache.GetAsync(t => t.CurrentSemester(today) is not null, cancellationToken);
+        return timetable.CurrentSemester(today) is { } semester ? TypedResults.Ok(timetable.Programmes(semester.Id)) : NoTimetable();
     }
 
     /// <summary>A study group's classes, optional subjects included (marked).</summary>
     internal static async Task<Results<Ok<TimetableResponse>, ProblemHttpResult>> GetGroupTimetable(Guid id, DateOnly? from,
-        DateOnly? to, CampusPulseDbContext db, TimeProvider time, CancellationToken cancellationToken)
+        DateOnly? to, TimetableCache cache, TimeProvider time, CancellationToken cancellationToken)
     {
         if (Range(from, to, time) is not { } range)
         {
@@ -251,71 +265,51 @@ public static class TimetableEndpoints
         }
 
         var (first, last) = range;
-
-        var group = await db.StudyGroups.SingleOrDefaultAsync(g => g.Id == id, cancellationToken);
-        if (group is null)
+        var timetable = await cache.GetAsync(t => t.Group(id) is not null, cancellationToken);
+        if (timetable.Group(id) is null)
         {
             return NoGroup();
         }
 
-        var schedule = await ClassSchedule.LoadAsync(db, [group.Id], [], first, last, cancellationToken);
-        return TypedResults.Ok(await TimetableResponseAsync(db, group, first, last, schedule.ForGroup(group.Id, first, last), cancellationToken));
+        return TypedResults.Ok(TimetableResponseOf(timetable, id, first, last, timetable.ForGroup(id, first, last)));
     }
 
     /// <summary>The optional and pick-a-time subjects of a group's year, with every slot they're offered at.</summary>
     internal static async Task<Results<Ok<IReadOnlyList<ChoiceSubjectResponse>>, ProblemHttpResult>> GetGroupChoices(Guid id,
-        CampusPulseDbContext db, CancellationToken cancellationToken)
+        TimetableCache cache, CancellationToken cancellationToken)
     {
-        var group = await db.StudyGroups.SingleOrDefaultAsync(g => g.Id == id, cancellationToken);
-        if (group is null)
-        {
-            return NoGroup();
-        }
-
-        var subjects = await db.Subjects
-            .Where(s => s.SemesterId == group.SemesterId && s.ProgrammeId == group.ProgrammeId && s.Year == group.Year
-                && s.Choice != SubjectChoice.Fixed && s.RetiredAt == null)
-            .ToListAsync(cancellationToken);
-        var subjectIds = subjects.Select(s => s.Id).ToList();
-        var offers = await db.OfferedSlots.Where(o => subjectIds.Contains(o.SubjectId)).ToListAsync(cancellationToken);
-        var rooms = await ClassSchedule.RoomCodesAsync(db, offers.Select(o => o.RoomId), cancellationToken);
-        IReadOnlyList<ChoiceSubjectResponse> body = [.. subjects.OrderBy(s => s.Name, StringComparer.InvariantCulture).Select(s => new ChoiceSubjectResponse(
-            s.Id, s.Name, s.ShortName, CampusVirtual.CourseUrl(s.CampusVirtualCourseId), s.Choice,
-            [.. offers.Where(o => o.SubjectId == s.Id).OrderBy(o => o.Weekday).ThenBy(o => o.StartsAt)
-                .Select(o => new OfferedSlotResponse(o.Id, o.Kinds.List(), o.Weekday, o.StartsAt, o.EndsAt, ClassSchedule.RoomCode(rooms, o.RoomId), o.Weeks.Weeks()))]))];
-        return TypedResults.Ok(body);
+        var timetable = await cache.GetAsync(t => t.Group(id) is not null, cancellationToken);
+        return timetable.Group(id) is { } group ? TypedResults.Ok(timetable.Choices(group)) : NoGroup();
     }
 
     internal static async Task<Results<Ok<StudentSettingsResponse>, ProblemHttpResult>> GetSettings(ClaimsPrincipal principal,
-        CampusPulseDbContext db, TimeProvider time, CancellationToken cancellationToken)
+        CampusPulseDbContext db, TimetableCache cache, TimeProvider time, CancellationToken cancellationToken)
     {
-        if (await UserAsync(db, principal, cancellationToken) is not { } user)
+        if (await StudyGroupOfAsync(db, principal, cancellationToken) is not { } student)
         {
             return MeEndpoint.NoAccount();
         }
 
-        var settings = await db.StudentSettings.SingleOrDefaultAsync(s => s.UserId == user.Id, cancellationToken);
-        return TypedResults.Ok(await SettingsResponseAsync(db, settings?.StudyGroupId, time, cancellationToken));
+        return TypedResults.Ok(await SettingsResponseAsync(cache, student.StudyGroupId, time, cancellationToken));
     }
 
-    private static async Task<StudentSettingsResponse> SettingsResponseAsync(CampusPulseDbContext db, Guid? groupId, TimeProvider time,
+    private static async Task<StudentSettingsResponse> SettingsResponseAsync(TimetableCache cache, Guid? groupId, TimeProvider time,
         CancellationToken cancellationToken)
     {
-        var group = groupId is null ? null : await db.StudyGroups.SingleOrDefaultAsync(g => g.Id == groupId, cancellationToken);
-        if (group is null)
+        var timetable = await cache.GetAsync(t => groupId is null || t.Group(groupId.Value) is not null, cancellationToken);
+        if (groupId is null || timetable.Group(groupId.Value) is not { } group)
         {
             return new StudentSettingsResponse(null, false, false);
         }
 
-        var current = await CurrentSemesterAsync(db, Today(time), cancellationToken);
-        var programme = await db.Programmes.SingleAsync(p => p.Id == group.ProgrammeId, cancellationToken);
-        return new StudentSettingsResponse(GroupResponse(group, programme), group.RetiredAt is not null,
+        var current = timetable.CurrentSemester(Today(time));
+        return new StudentSettingsResponse(timetable.GroupResponse(group.Id), group.RetiredAt is not null,
             current is not null && current.Id != group.SemesterId);
     }
 
     /// <summary>Sets the student's study group (null clears it). 400 for a group that doesn't exist.</summary>
     internal static async Task<Results<Ok<StudentSettingsResponse>, ProblemHttpResult>> UpdateSettings(
-        UpdateStudentSettingsRequest request, ClaimsPrincipal principal, CampusPulseDbContext db, TimeProvider time,
+        UpdateStudentSettingsRequest request, ClaimsPrincipal principal, CampusPulseDbContext db, TimetableCache cache, TimeProvider time,
         CancellationToken cancellationToken)
     {
         if (await UserAsync(db, principal, cancellationToken) is not { } user)
@@ -323,6 +317,7 @@ public static class TimetableEndpoints
             return MeEndpoint.NoAccount();
         }
 
+        // Checked in the database, not the cache: a write goes by what is stored now.
         if (request.StudyGroupId is { } groupId && !await db.StudyGroups.AnyAsync(g => g.Id == groupId && g.RetiredAt == null, cancellationToken))
         {
             return TypedResults.Problem(statusCode: StatusCodes.Status400BadRequest, title: "No such study group",
@@ -342,7 +337,7 @@ public static class TimetableEndpoints
 
                 settings.SetStudyGroup(request.StudyGroupId, time.GetUtcNow());
                 await db.SaveChangesAsync(cancellationToken);
-                return TypedResults.Ok(await SettingsResponseAsync(db, request.StudyGroupId, time, cancellationToken));
+                return TypedResults.Ok(await SettingsResponseAsync(cache, request.StudyGroupId, time, cancellationToken));
             }
             catch (DbUpdateException e) when (attempt == 1 && IsRace(e))
             {
@@ -357,20 +352,19 @@ public static class TimetableEndpoints
     }
 
     internal static async Task<Results<Ok<IReadOnlyList<StudentSubjectResponse>>, ProblemHttpResult>> GetSubjects(
-        ClaimsPrincipal principal, CampusPulseDbContext db, CancellationToken cancellationToken)
+        ClaimsPrincipal principal, CampusPulseDbContext db, TimetableCache cache, CancellationToken cancellationToken)
     {
-        if (await UserAsync(db, principal, cancellationToken) is not { } user)
+        if (await StudentTimetableChoices.ForOidAsync(db, Oid(principal), cancellationToken) is not { } student)
         {
             return MeEndpoint.NoAccount();
         }
 
-        var picks = await db.StudentSubjects.Where(s => s.UserId == user.Id).ToListAsync(cancellationToken);
-        var subjectIds = picks.Select(p => p.SubjectId).ToList();
-        var subjects = await db.Subjects.Where(s => subjectIds.Contains(s.Id)).ToDictionaryAsync(s => s.Id, cancellationToken);
-        IReadOnlyList<StudentSubjectResponse> body = [.. picks.Where(p => subjects.ContainsKey(p.SubjectId))
-            .Select(p => (Pick: p, Subject: subjects[p.SubjectId]))
-            .OrderBy(x => x.Subject.Name, StringComparer.InvariantCulture)
-            .Select(x => new StudentSubjectResponse(x.Subject.Id, x.Subject.Name, x.Subject.ShortName,
+        var timetable = await cache.GetAsync(t => student.Subjects.All(p => t.Subject(p.SubjectId) is not null), cancellationToken);
+        IReadOnlyList<StudentSubjectResponse> body = [.. student.Subjects
+            .Select(p => (Pick: p, Subject: timetable.Subject(p.SubjectId)))
+            .Where(x => x.Subject is not null)
+            .OrderBy(x => x.Subject!.Name, StringComparer.InvariantCulture)
+            .Select(x => new StudentSubjectResponse(x.Subject!.Id, x.Subject.Name, x.Subject.ShortName,
                 CampusVirtual.CourseUrl(x.Subject.CampusVirtualCourseId), x.Subject.Choice, x.Pick.OfferedSlotId, x.Subject.RetiredAt is not null))];
         return TypedResults.Ok(body);
     }
@@ -379,6 +373,7 @@ public static class TimetableEndpoints
     /// Takes an optional subject, or picks a time for a pick-a-time one: <c>offeredSlotId</c> is one of its
     /// offered slots (GET /timetable/groups/{id}/choices), or null for "taking it, no time picked yet".
     /// 404 for an unknown subject; 400 for a subject with nothing to choose or an offer of another subject.
+    /// Checked in the database, not the cache: a write goes by what is stored now.
     /// </summary>
     internal static async Task<Results<Ok<StudentSubjectResponse>, ProblemHttpResult>> PickSubject(Guid subjectId,
         PickSubjectRequest request, ClaimsPrincipal principal, CampusPulseDbContext db, TimeProvider time,
@@ -389,7 +384,7 @@ public static class TimetableEndpoints
             return MeEndpoint.NoAccount();
         }
 
-        var subject = await db.Subjects.SingleOrDefaultAsync(s => s.Id == subjectId, cancellationToken);
+        var subject = await db.Subjects.AsNoTracking().SingleOrDefaultAsync(s => s.Id == subjectId, cancellationToken);
         if (subject is null)
         {
             return TypedResults.Problem(statusCode: StatusCodes.Status404NotFound, title: "No such subject");
@@ -456,10 +451,10 @@ public static class TimetableEndpoints
     /// <summary>
     /// The signed-in student's classes: their group's, minus optional subjects they didn't choose, plus the
     /// offered slots they picked. Without a group (none picked yet, or it disappeared in a re-import) only
-    /// the picks.
+    /// the picks. One query (the student's own choices); the rest is the cached timetable.
     /// </summary>
     internal static async Task<Results<Ok<TimetableResponse>, ProblemHttpResult>> GetMyTimetable(DateOnly? from, DateOnly? to,
-        ClaimsPrincipal principal, CampusPulseDbContext db, TimeProvider time, CancellationToken cancellationToken)
+        ClaimsPrincipal principal, CampusPulseDbContext db, TimetableCache cache, TimeProvider time, CancellationToken cancellationToken)
     {
         if (Range(from, to, time) is not { } range)
         {
@@ -468,29 +463,22 @@ public static class TimetableEndpoints
 
         var (first, last) = range;
 
-        if (await UserAsync(db, principal, cancellationToken) is not { } user)
+        if (await StudentTimetableChoices.ForOidAsync(db, Oid(principal), cancellationToken) is not { } student)
         {
             return MeEndpoint.NoAccount();
         }
 
-        var student = (await StudentTimetableChoices.LoadAsync(db, [user.Id], cancellationToken)).Single();
-        var group = student.StudyGroupId is { } groupId
-            ? await db.StudyGroups.SingleOrDefaultAsync(g => g.Id == groupId, cancellationToken)
-            : null;
-        var schedule = await ClassSchedule.ForStudentsAsync(db, [student], first, last, cancellationToken);
-        return TypedResults.Ok(await TimetableResponseAsync(db, group, first, last, schedule.ForStudent(student, first, last), cancellationToken));
+        var timetable = await cache.GetAsync(t => (student.StudyGroupId is not { } groupId || t.Group(groupId) is not null)
+            && student.Subjects.All(s => s.OfferedSlotId is not { } offerId || t.HasOffer(offerId)), cancellationToken);
+        return TypedResults.Ok(TimetableResponseOf(timetable, student.StudyGroupId, first, last, timetable.ForStudent(student, first, last)));
     }
 
-    internal static async Task<Ok<IReadOnlyList<RoomResponse>>> GetRooms(CampusPulseDbContext db, CancellationToken cancellationToken)
-    {
-        var rooms = await db.Rooms.ToListAsync(cancellationToken);
-        IReadOnlyList<RoomResponse> body = [.. rooms.OrderBy(r => r.Code, StringComparer.Ordinal).Select(RoomResponseOf)];
-        return TypedResults.Ok(body);
-    }
+    internal static async Task<Ok<IReadOnlyList<RoomResponse>>> GetRooms(TimetableCache cache, CancellationToken cancellationToken) =>
+        TypedResults.Ok((await cache.GetAsync(cancellationToken)).Rooms);
 
     /// <summary>Everything in a room on a date (default today): grid slots and offered slots.</summary>
     internal static async Task<Results<Ok<RoomTimetableResponse>, ProblemHttpResult>> GetRoomTimetable(string code, DateOnly? date,
-        CampusPulseDbContext db, TimeProvider time, CancellationToken cancellationToken)
+        TimetableCache cache, TimeProvider time, CancellationToken cancellationToken)
     {
         var day = date ?? Today(time);
         if (day < Earliest || day > Latest)
@@ -499,83 +487,34 @@ public static class TimetableEndpoints
         }
 
         var normalized = Import.CellText.NormalizeRoom(code);
-        var room = await db.Rooms.SingleOrDefaultAsync(r => r.Code == normalized, cancellationToken);
-        if (room is null)
+        var timetable = await cache.GetAsync(t => t.Room(normalized) is not null, cancellationToken);
+        if (timetable.Room(normalized) is not { } room)
         {
             return TypedResults.Problem(statusCode: StatusCodes.Status404NotFound, title: "No such room");
         }
 
-        var semester = await SemesterOnAsync(db, day, cancellationToken);
-        var week = semester?.WeekOf(day);
-        var occurrences = new List<RoomOccurrenceResponse>();
-        if (semester is not null && week is { } weekNumber && semester.HasClasses(day))
-        {
-            var weekday = day.DayOfWeek;
-            var slots = await db.TimetableSlots.Include(s => s.Groups)
-                .Where(s => s.SemesterId == semester.Id && s.RoomId == room.Id && s.Weekday == weekday)
-                .ToListAsync(cancellationToken);
-            var offers = await db.OfferedSlots
-                .Where(o => o.RoomId == room.Id && o.Weekday == weekday && db.Subjects.Any(s => s.Id == o.SubjectId && s.SemesterId == semester.Id))
-                .ToListAsync(cancellationToken);
-            var subjectIds = slots.Select(s => s.SubjectId).Concat(offers.Select(o => o.SubjectId)).Distinct().ToList();
-            var subjects = await db.Subjects.Where(s => subjectIds.Contains(s.Id)).ToDictionaryAsync(s => s.Id, cancellationToken);
-            var groupIds = slots.SelectMany(s => s.Groups.Select(g => g.StudyGroupId)).Distinct().ToList();
-            var groups = await db.StudyGroups.Where(g => groupIds.Contains(g.Id)).ToDictionaryAsync(g => g.Id, cancellationToken);
-            var programmeIds = groups.Values.Select(g => g.ProgrammeId).Distinct().ToList();
-            var programmes = await db.Programmes.Where(p => programmeIds.Contains(p.Id)).ToDictionaryAsync(p => p.Id, cancellationToken);
-            occurrences.AddRange(slots.Where(s => s.Weeks.Contains(weekNumber)).Select(s => new RoomOccurrenceResponse(s.StartsAt, s.EndsAt,
-                subjects[s.SubjectId].Name, CampusVirtual.CourseUrl(subjects[s.SubjectId].CampusVirtualCourseId), s.Kinds.List(),
-                [.. s.Groups.Select(g => groups[g.StudyGroupId]).Select(g => $"{programmes[g.ProgrammeId].Code} {g.Year} {g.Label}").Order(StringComparer.Ordinal)],
-                Offered: false)));
-            occurrences.AddRange(offers.Where(o => o.Weeks.Contains(weekNumber)).Select(o => new RoomOccurrenceResponse(o.StartsAt, o.EndsAt,
-                subjects[o.SubjectId].Name, CampusVirtual.CourseUrl(subjects[o.SubjectId].CampusVirtualCourseId), o.Kinds.List(), [], Offered: true)));
-        }
-
-        return TypedResults.Ok(new RoomTimetableResponse(day, week, RoomResponseOf(room),
-            [.. occurrences.OrderBy(o => o.StartsAt).ThenBy(o => o.Subject, StringComparer.InvariantCulture)]));
+        var (week, occurrences) = timetable.RoomDay(room, day);
+        return TypedResults.Ok(new RoomTimetableResponse(day, week, RoomResponse.Of(room), occurrences));
     }
 
     /// <summary>The body of a timetable: the classes, the group, and the notes of the group's year.</summary>
-    private static async Task<TimetableResponse> TimetableResponseAsync(CampusPulseDbContext db, StudyGroup? group, DateOnly from,
-        DateOnly to, IReadOnlyList<OccurrenceResponse> occurrences, CancellationToken cancellationToken)
+    private static TimetableResponse TimetableResponseOf(TimetableSnapshot timetable, Guid? groupId, DateOnly from, DateOnly to,
+        IReadOnlyList<OccurrenceResponse> occurrences) =>
+        new(from, to, timetable.GroupResponse(groupId), occurrences, timetable.Notes(groupId));
+
+    private static string Oid(ClaimsPrincipal principal) => MeEndpoint.Identity.From(principal).Oid;
+
+    /// <summary>The signed-in student's id and study group, or null without an account. One query.</summary>
+    private static async Task<(Guid UserId, Guid? StudyGroupId)?> StudyGroupOfAsync(CampusPulseDbContext db, ClaimsPrincipal principal,
+        CancellationToken cancellationToken)
     {
-        var notes = group is null
-            ? []
-            : await db.TimetableNotes.Where(n => n.SemesterId == group.SemesterId && n.ProgrammeId == group.ProgrammeId && n.Year == group.Year)
-                .OrderBy(n => n.SourceCell).Select(n => new TimetableNoteResponse(n.Text)).ToListAsync(cancellationToken);
-        return new TimetableResponse(from, to, await GroupResponseAsync(db, group?.Id, cancellationToken), occurrences, notes);
+        var oid = Oid(principal);
+        var row = await db.Users.AsNoTracking()
+            .Where(u => u.EntraObjectId == oid)
+            .Select(u => new { u.Id, StudyGroupId = db.StudentSettings.Where(s => s.UserId == u.Id).Select(s => s.StudyGroupId).FirstOrDefault() })
+            .SingleOrDefaultAsync(cancellationToken);
+        return row is null ? null : (row.Id, row.StudyGroupId);
     }
-
-    private static async Task<Semester?> CurrentSemesterAsync(CampusPulseDbContext db, DateOnly today, CancellationToken cancellationToken)
-    {
-        var semesters = (await db.Semesters.Include(s => s.Weeks).Include(s => s.NonTeachingDays).Include(s => s.Breaks)
-            .ToListAsync(cancellationToken))
-            .Where(s => s.WeekCount > 0)
-            .ToList();
-        return semesters.FirstOrDefault(s => s.FirstDay <= today && today <= s.LastDay)
-            ?? semesters.Where(s => s.FirstDay > today).MinBy(s => s.FirstDay)
-            ?? semesters.MaxBy(s => s.LastDay);
-    }
-
-    private static async Task<Semester?> SemesterOnAsync(CampusPulseDbContext db, DateOnly day, CancellationToken cancellationToken) =>
-        (await db.Semesters.Include(s => s.Weeks).Include(s => s.NonTeachingDays).ToListAsync(cancellationToken))
-            .FirstOrDefault(s => s.WeekCount > 0 && s.FirstDay <= day && day <= s.LastDay);
-
-    private static async Task<StudyGroupResponse?> GroupResponseAsync(CampusPulseDbContext db, Guid? groupId, CancellationToken cancellationToken)
-    {
-        if (groupId is null || await db.StudyGroups.SingleOrDefaultAsync(g => g.Id == groupId, cancellationToken) is not { } group)
-        {
-            return null;
-        }
-
-        var programme = await db.Programmes.SingleAsync(p => p.Id == group.ProgrammeId, cancellationToken);
-        return GroupResponse(group, programme);
-    }
-
-    private static StudyGroupResponse GroupResponse(StudyGroup group, Programme programme) =>
-        new(group.Id, programme.Code, programme.Name, group.Year, group.Series, group.Label);
-
-    private static RoomResponse RoomResponseOf(Room room) => new(room.Code, room.Building, room.Floor, room.Capacity);
 
     private static Task<User?> UserAsync(CampusPulseDbContext db, ClaimsPrincipal principal, CancellationToken cancellationToken) =>
         MeEndpoint.FindUserAsync(db, principal, cancellationToken);
