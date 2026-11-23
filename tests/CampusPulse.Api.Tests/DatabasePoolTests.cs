@@ -4,8 +4,8 @@ using Npgsql;
 
 namespace CampusPulse.Api.Tests;
 
-/// <summary>The connection pool is sized explicitly (<c>Database:MaxPoolSize</c>, <c>Database:MinPoolSize</c>), not left at
-/// Npgsql's 100 connections per process.</summary>
+/// <summary>The connection pool is sized explicitly (<c>Database:MaxPoolSize</c>, <c>Database:MinPoolSize</c>, else the
+/// connection string's size), not left at Npgsql's 100 connections per process.</summary>
 public sealed class DatabasePoolTests
 {
     private const string ConnectionString = "Host=localhost;Database=campuspulse;Username=campuspulse;Password=secret";
@@ -29,6 +29,16 @@ public sealed class DatabasePoolTests
         var pool = Sized(ConnectionString + ";Maximum Pool Size=100", ("MaxPoolSize", "8"), ("MinPoolSize", "2"));
 
         Assert.Equal((8, 2), (pool.MaxPoolSize, pool.MinPoolSize));
+    }
+
+    [Theory]
+    [InlineData(";Maximum Pool Size=40;Minimum Pool Size=5")]
+    [InlineData(";MaxPoolSize=40;MinPoolSize=5")]
+    public void Without_settings_a_size_in_the_connection_string_is_kept(string sizes)
+    {
+        var pool = Sized(ConnectionString + sizes);
+
+        Assert.Equal((40, 5), (pool.MaxPoolSize, pool.MinPoolSize));
     }
 
     [Theory]

@@ -15,6 +15,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Npgsql;
 
 namespace CampusPulse.Api.Tests;
 
@@ -34,12 +35,15 @@ public sealed class TimetableCacheTests(ImportedTimetable timetable) : IClassFix
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
     };
 
-    /// <summary>Counts the SQL commands the app sends.</summary>
+    /// <summary>Counts the SQL commands the app sends; with <see cref="DatabaseDown"/>, every query fails as if the
+    /// database couldn't be reached.</summary>
     private sealed class CommandCounter : DbCommandInterceptor
     {
         private int _count;
 
         public int Count => Volatile.Read(ref _count);
+
+        public bool DatabaseDown { get; set; }
 
         public void Reset() => Interlocked.Exchange(ref _count, 0);
 
@@ -47,7 +51,9 @@ public sealed class TimetableCacheTests(ImportedTimetable timetable) : IClassFix
             InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
         {
             Interlocked.Increment(ref _count);
-            return base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
+            return DatabaseDown
+                ? throw new NpgsqlException("The database can't be reached (test).")
+                : base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
         }
 
         public override ValueTask<InterceptionResult<object>> ScalarExecutingAsync(DbCommand command, CommandEventData eventData,
@@ -232,24 +238,97 @@ public sealed class TimetableCacheTests(ImportedTimetable timetable) : IClassFix
         Assert.Equal(2, Loads(logs));
     }
 
-    /// <summary>Something new is never missed: an id the cached timetable doesn't have (a group from an import that ran
-    /// a moment ago, picked on another instance) makes the cache check at once.</summary>
+    /// <summary>A semester's first and last day come from its first and last week, so its weeks must load in order
+    /// whatever order the rows are stored in. Rewriting them last-week-first puts them in reverse physical order.</summary>
     [PostgresFact]
-    public async Task A_group_the_cache_does_not_have_yet_is_found_at_once()
+    public async Task Weeks_load_in_order_whatever_order_the_rows_are_stored_in()
+    {
+        await using (var db = timetable.Factory.CreateDbContext())
+        {
+            var semester = await db.Semesters.SingleAsync(s => s.AcademicYear == "2030-2031");
+            for (var week = 14; week >= 1; week--)
+            {
+                await db.Database.ExecuteSqlAsync($"UPDATE teaching_weeks SET starts_on = starts_on WHERE semester_id = {semester.Id} AND number = {week}");
+            }
+        }
+
+        using var app = App(new TestClock(Now), new CommandCounter());
+        var client = app.CreateClient();
+        var oid = NewOid();
+
+        var semesterNow = await Get<SemesterResponse>(client, "/semesters/current", oid);
+        var room = await Get<RoomTimetableResponse>(client, "/rooms/K210/timetable?date=2030-09-30", oid);
+
+        Assert.Equal(("2030-2031", 2), (semesterNow.AcademicYear, semesterNow.TodayWeek));
+        Assert.Equal(1, room.Week);
+        Assert.Single(room.Occurrences);
+    }
+
+    /// <summary>Something new is never missed for long: an id the cached timetable doesn't have (a group from an import
+    /// that ran a moment ago, picked on another instance) makes the cache check, once a second at most, so ids nobody
+    /// has can't make every request query the database.</summary>
+    [PostgresFact]
+    public async Task A_group_the_cache_does_not_have_yet_is_found_within_a_second()
     {
         var logs = new CollectingLoggerProvider();
-        using var app = App(new TestClock(Now), new CommandCounter(), logs);
+        var commands = new CommandCounter();
+        var clock = new TestClock(Now);
+        using var app = App(clock, commands, logs);
         var client = app.CreateClient();
         var oid = NewOid();
         await Get<List<RoomResponse>>(client, "/rooms", oid);
 
         await ImportAnotherYear("2045-2046", "2045-09-25", "Programul Alfa");
         var newGroup = await AGroupOf("2045-2046");
-        var response = await client.SendAsync(Request(HttpMethod.Get, $"/timetable/groups/{newGroup}", oid));
-        var unknown = await client.SendAsync(Request(HttpMethod.Get, $"/timetable/groups/{Guid.NewGuid()}", oid));
+        clock.Advance(TimeSpan.FromSeconds(1));
+        var found = await client.SendAsync(Request(HttpMethod.Get, $"/timetable/groups/{newGroup}", oid));
+        commands.Reset();
+        var unknown = await Task.WhenAll(Enumerable.Range(0, 5).Select(_ =>
+            client.SendAsync(Request(HttpMethod.Get, $"/timetable/groups/{Guid.NewGuid()}", oid))));
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal(HttpStatusCode.NotFound, unknown.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, found.StatusCode);
+        Assert.All(unknown, r => Assert.Equal(HttpStatusCode.NotFound, r.StatusCode));
+        Assert.Equal(0, commands.Count);   // checked less than a second ago
         Assert.Equal(2, Loads(logs));
+    }
+
+    /// <summary>When the database can't be asked, timetable reads keep working from memory, and the cache tries again
+    /// only an interval later, not on every request.</summary>
+    [PostgresFact]
+    public async Task Without_the_database_the_timetable_in_memory_is_served()
+    {
+        var logs = new CollectingLoggerProvider();
+        var commands = new CommandCounter();
+        var clock = new TestClock(Now);
+        using var app = App(clock, commands, logs);
+        var client = app.CreateClient();
+        var oid = NewOid();
+        var before = await Get<List<RoomResponse>>(client, "/rooms", oid);
+
+        commands.DatabaseDown = true;
+        commands.Reset();
+        clock.Advance(TimeSpan.FromSeconds(61));
+        var during = await Task.WhenAll(Enumerable.Range(0, 5).Select(_ => Get<List<RoomResponse>>(client, "/rooms", oid)));
+
+        Assert.All(during, rooms => Assert.Equal(before.Count, rooms.Count));
+        Assert.Equal(1, commands.Count);   // one failed check, then from memory
+        var warning = Assert.Single(logs.Entries, e => e.Category == typeof(TimetableCache).FullName && e.Level == LogLevel.Warning);
+        Assert.Contains("serving the timetable in memory", warning.Message);
+    }
+
+    /// <summary>With nothing in memory yet and the database down, a failed load fails the requests of the next second
+    /// at once instead of each trying again in turn.</summary>
+    [PostgresFact]
+    public async Task A_failed_first_load_is_not_retried_by_every_request()
+    {
+        var commands = new CommandCounter { DatabaseDown = true };
+        using var app = App(new TestClock(Now), commands);
+        var client = app.CreateClient();
+        var oid = NewOid();
+
+        var responses = await Task.WhenAll(Enumerable.Range(0, 5).Select(_ => client.SendAsync(Request(HttpMethod.Get, "/rooms", oid))));
+
+        Assert.All(responses, r => Assert.Equal(HttpStatusCode.InternalServerError, r.StatusCode));
+        Assert.Equal(1, commands.Count);
     }
 }

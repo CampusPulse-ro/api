@@ -126,8 +126,12 @@ public sealed class TimetableSnapshot
     {
         await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken);
         var version = await VersionAsync(db, cancellationToken);
+        // Split, so the three calendars aren't multiplied into one result; each ordered, because a split query orders
+        // a child only by its parent, and a semester's first and last day are its first and last week.
         var semesters = await db.Semesters.AsNoTracking().AsSplitQuery()
-            .Include(s => s.Weeks).Include(s => s.NonTeachingDays).Include(s => s.Breaks)
+            .Include(s => s.Weeks.OrderBy(w => w.Number))
+            .Include(s => s.NonTeachingDays.OrderBy(d => d.Date))
+            .Include(s => s.Breaks.OrderBy(b => b.From))
             .OrderBy(s => s.AcademicYear).ThenBy(s => s.Number)
             .ToListAsync(cancellationToken);
         var programmes = await db.Programmes.AsNoTracking().ToListAsync(cancellationToken);

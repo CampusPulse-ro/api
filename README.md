@@ -40,7 +40,7 @@ Environment variables only:
 | `TimetableCache__VersionCheckSeconds` | how often, at most, the cached timetable asks the database whether an import ran; default `10` (see [Timetable cache](#timetable-cache)) |
 | `Limits__MaxRequestBodyBytes` | the largest request body Kestrel takes; default `16384` (16 KiB). Larger is a 413 ProblemDetails |
 | `Limits__RequestTimeoutSeconds` | a request running longer is cancelled and answered 504 ProblemDetails; default `30` |
-| `Database__MaxPoolSize`, `Database__MinPoolSize` | the Npgsql connection pool of one process; default `20` and `0`. They win over pool sizes in the connection string |
+| `Database__MaxPoolSize`, `Database__MinPoolSize` | the Npgsql connection pool of one process. Set, they win over the connection string; unset, a size in the connection string is kept, else `20` and `0` |
 | `Metrics__Port` | serve [metrics](#metrics) on `127.0.0.1:<port>`. Unset (the default): no metrics |
 
 ## Sign-in
@@ -477,10 +477,14 @@ classes. A request only turns weeks into dates.
   again when it changed: nine queries in one REPEATABLE READ transaction, so the data and its label come from the same
   database snapshot.
 - After an import every instance serves it within 10 s. A read that looks for something the snapshot lacks (a new
-  group's id from a client, the group a student just picked) checks at once, so new data is never missed; only
-  changed data can be up to 10 s old.
-- One check or load runs at a time: requests that arrive meanwhile wait for it instead of each querying the database
-  (no stampede).
+  group's id from a client, the group a student just picked) makes the cache check sooner, at most once a second, so
+  new data is found within a second and made-up ids can't make every request query the database. Changed data can
+  be up to 10 s old.
+- One check or load runs at a time: requests that arrive meanwhile wait for it and reuse its result instead of each
+  querying the database (no stampede).
+- **Database down:** a check that can't reach the database keeps serving the snapshot in memory (one Warning) and
+  tries again an interval later, so timetable reads keep working. With nothing loaded yet, a failed load fails the
+  next second's requests at once instead of each trying again in turn.
 - `GET /me/timetable` is **one query** (the student's account, group and choices, joined) plus the cached group
   schedule. The class reminders use the same snapshot. **Per-student data is never cached on the server**: a change
   shows on the next request.
@@ -524,7 +528,8 @@ credentialed requests mixing attacker input with a secret, and this API takes be
   planner rightly reads them whole). The one gap was the cache's own version query, which now has
   `ix_timetable_import_runs_imported_at_id` (read backwards: one entry).
 - Read paths use `AsNoTracking` (no change-tracking snapshots for rows that are only read).
-- **Pool:** at most `Database__MaxPoolSize` (20) connections per process instead of Npgsql's 100. Stage and prod share
+- **Pool:** at most `Database__MaxPoolSize` (20; or the connection string's size when that setting is unset)
+  connections per process instead of Npgsql's 100. Stage and prod share
   one Postgres with `max_connections = 100`, so a spike in both still leaves room for migrations, backups and psql. A
   request that finds all 20 busy waits for one (up to the connection string's `Timeout`).
 
