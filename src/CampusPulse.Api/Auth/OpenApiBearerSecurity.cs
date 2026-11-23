@@ -24,7 +24,8 @@ public static class OpenApiBearerSecurity
                 Type = SecuritySchemeType.Http,
                 Scheme = "bearer",
                 BearerFormat = "JWT",
-                Description = "A Microsoft access token for a UPT account, for this API's access_as_user scope.",
+                Description = "A CampusPulse access token (from /auth/email/verify, /auth/microsoft or /auth/refresh). "
+                    + "Installed app versions may still send a Microsoft access token for a UPT account (scope access_as_user).",
             };
             return Task.CompletedTask;
         });

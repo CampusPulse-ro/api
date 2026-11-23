@@ -153,7 +153,8 @@ public sealed class AuthTests(AuthTests.ConfiguredFactory factory) : IClassFixtu
             foreach (var operation in path.Value.EnumerateObject())
             {
                 var secured = operation.Value.TryGetProperty("security", out _);
-                Assert.True(secured != path.Name.StartsWith("/health"), $"{operation.Name} {path.Name}: secured={secured}");
+                var anonymous = path.Name.StartsWith("/health", StringComparison.Ordinal) || path.Name.StartsWith("/auth/", StringComparison.Ordinal);
+                Assert.True(secured != anonymous, $"{operation.Name} {path.Name}: secured={secured}");
             }
         }
     }
@@ -290,7 +291,7 @@ public sealed class MeTests(PostgresAppFactory factory) : IClassFixture<Postgres
         var created = await PostMe(TestAuth.Token(oid: oid));
         Assert.Equal(HttpStatusCode.Created, created.StatusCode);
         var me = await created.Content.ReadFromJsonAsync<MeResponse>();
-        Assert.Equal("ana@student.upt.ro", me!.Email);
+        Assert.Equal($"{oid}@student.upt.ro", me!.Email);
         Assert.Equal("Ana Pop", me.DisplayName);
 
         var again = await PostMe(TestAuth.Token(oid: oid));
@@ -299,7 +300,9 @@ public sealed class MeTests(PostgresAppFactory factory) : IClassFixture<Postgres
 
         var read = await GetMe(TestAuth.Token(oid: oid));
         Assert.Equal(HttpStatusCode.OK, read.StatusCode);
-        Assert.Equal(me, await read.Content.ReadFromJsonAsync<MeResponse>());
+        var readBack = (await read.Content.ReadFromJsonAsync<MeResponse>())!;
+        Assert.Equal((me.Id, me.Email, me.DisplayName, me.UptLinked), (readBack.Id, readBack.Email, readBack.DisplayName, readBack.UptLinked));
+        Assert.Equal(me.Identities, readBack.Identities);
 
         await using var db = factory.CreateDbContext();
         Assert.Equal(1, await db.Users.CountAsync(u => u.EntraObjectId == oid));
@@ -331,7 +334,7 @@ public sealed class MeTests(PostgresAppFactory factory) : IClassFixture<Postgres
         var bare = await GetMe(TestAuth.Token(oid: oid, name: null, email: null));
 
         var me = await bare.Content.ReadFromJsonAsync<MeResponse>();
-        Assert.Equal("ana@student.upt.ro", me!.Email);
+        Assert.Equal($"{oid}@student.upt.ro", me!.Email);
         Assert.Equal("Ana Pop", me.DisplayName);
     }
 

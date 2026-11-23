@@ -32,11 +32,15 @@ Environment variables only:
 | `Logging__LogLevel__<category>` | the usual .NET log levels, for stdout and the file alike; defaults in `appsettings.json` (Information, `Microsoft.AspNetCore` at Warning, `Microsoft.AspNetCore.DataProtection` at Error: sign-in registers Data Protection, which nothing uses (bearer tokens only), and with no home directory, as for the Pi's service users, it warns at every start that its keys are in memory. Lower it again once a feature protects data across restarts; `Microsoft.EntityFrameworkCore` at Warning, so SQL commands aren't logged: `Logging__LogLevel__Microsoft.EntityFrameworkCore.Database.Command=Information` shows them while debugging) |
 | `Auth__TenantId` | UPT's Entra tenant id (`6bb41fe4-40a3-4a10-b6cd-38278e78b21a`). With `Auth__ClientId` unset too, sign-in is off and every endpoint that needs it answers 401 (see Sign-in) |
 | `Auth__ClientId` | the app registration's client id (one registration for web, mobile and the API) |
-| `HTTPS_PROXY`, `NO_PROXY` | on the Pi, the egress proxy the API reaches Microsoft and Expo through (see Sign-in, Push notifications) |
+| `Auth__SigningKey` | the key our own tokens are signed with (HS256): base64 of at least 32 random bytes (`openssl rand -base64 32`), one per environment, a secret. Unset: no sessions are issued (`/auth/*` answers 503; see [Sign-in](#sign-in)), except in Development, where each start makes one up. Not base64 or too short: the start fails. Changing it signs every access token out (refresh tokens keep working) |
+| `Email__ResendApiKey` | the [Resend](https://resend.com) API key sign-in codes are sent with (see [Email sender](#email-sender)), a secret. Unset: email sign-in answers 503, except in Development (codes go to the log) |
+| `Email__From` | the sender, default `CampusPulse <no-reply@campuspulse.thorsp.net>`; its domain must be verified at Resend |
+| `HTTPS_PROXY`, `NO_PROXY` | on the Pi, the egress proxy the API reaches Microsoft, Expo and Resend through (see Sign-in, Push notifications, Email sender) |
 | `Push__Expo__AccessToken` | optional: an Expo access token, sent as `Authorization: Bearer` to Expo's push API. Needed only once "enhanced security for push notifications" is turned on for the Expo project |
 | `Reminders__Enabled` | `false` stops sending class reminders (see [Class reminders](#class-reminders)); default `true`. The tests turn it off |
 | `RateLimits__Enabled` | `false` turns the rate limits off (load tests, an emergency); default `true`. See [Rate limits](#rate-limits) |
-| `RateLimits__<bucket>__Burst`, `RateLimits__<bucket>__PerMinute` | the token buckets: `SignedIn` (per student) 100 / 100, `Anonymous` (per client IP) 300 / 300, `Writes` 30 / 30, `Account` (`POST`/`DELETE /me`) 10 / 1. A value below 1 fails the start |
+| `RateLimits__<bucket>__Burst`, `RateLimits__<bucket>__PerMinute` | the token buckets: `SignedIn` (per student) 100 / 100, `Anonymous` (per client IP) 300 / 300, `Writes` 30 / 30, `Auth` (`/auth/*`, per client IP) 60 / 60, `Account` (`POST`/`DELETE /me`, linking UPT) 10 / 1. A value below 1 fails the start |
+| `RateLimits__EmailStart__Limit`, `RateLimits__EmailStart__WindowMinutes` | `POST /auth/email/start` per client IP: 20 an hour by default. Raise it for an event where many students share one network (a lab, the dorms); the per-address limits stay |
 | `TimetableCache__VersionCheckSeconds` | how often, at most, the cached timetable asks the database whether an import ran; default `10` (see [Timetable cache](#timetable-cache)) |
 | `Limits__MaxRequestBodyBytes` | the largest request body Kestrel takes; default `16384` (16 KiB). Larger is a 413 ProblemDetails |
 | `Limits__RequestTimeoutSeconds` | a request running longer is cancelled and answered 504 ProblemDetails; default `30` |
@@ -45,13 +49,92 @@ Environment variables only:
 
 ## Sign-in
 
-Students sign in with their UPT Microsoft account. The clients (MSAL in web, expo-auth-session in
-mobile) get an access token for this API from UPT's tenant and send it as
-`Authorization: Bearer …`. Web, mobile and the API are **one app registration**, so one client id.
+CampusPulse has its own accounts (CampusPulse-ro/api#63). A student signs in with **an email and a one-time code**, or
+with **UPT Microsoft** ("Continue with UPT"); UPT can also be linked to an email account later. Either way the API
+issues **its own tokens**: a short access token and a refresh token. The app works without UPT (timetable, rooms,
+reminders, manual deadlines); linking UPT adds Microsoft-verified student status and, on the phone, Campus Virtual.
 
-**Every endpoint needs a token** except `/`, `/health*` and `/openapi/v1.json`: a fallback policy
-protects anything not marked `.AllowAnonymous()`, so a new endpoint is protected by default, and the
-contract marks every other operation as needing the bearer token. The API accepts a token only if it:
+**Every endpoint needs a bearer token** except `/`, `/health*`, `/openapi/v1.json` and `/auth/*`: a fallback policy
+protects anything not marked `.AllowAnonymous()`, so a new endpoint is protected by default, and the contract marks
+every other operation as needing the bearer token. Two kinds of bearer token are accepted, chosen by the token's issuer:
+
+- **Ours** (issuer `campuspulse`), what every client sends from now on: a JWT signed with `Auth__SigningKey` (HS256),
+  audience `campuspulse-api`, `sub` = the account id, `amr` = how the student signed in (`email` or `upt-microsoft`),
+  valid **15 minutes**. Checked without the database.
+- **A UPT Entra access token** (today's scheme), so installed app versions keep working: checked as below, and the
+  account found through its `upt-microsoft` identity. Clients otherwise send Entra tokens only to `/auth/microsoft` and
+  to link UPT.
+
+Anything else is 401, logged at Warning with the reason (never the token).
+
+### Endpoints
+
+All JSON; errors are ProblemDetails whose **`type`** is stable and says which (the title and detail are for people).
+
+| Method + path | Auth | Request → answer |
+|---|---|---|
+| `POST /auth/email/start` | none | `{ "email": "ana@example.com", "language": "en" }` (`"en"` or `"ro"`, the email's language) → **202** `{ "expiresInSeconds": 600, "resendAfterSeconds": 60 }`, **always**, whether or not an account has the address (signing in creates one, so nothing is revealed). Sends "Your CampusPulse code: 123456". **400** `invalid-email`; **429** `too-many-codes` (with `Retry-After`) or the per-IP limit; **503** `email-unavailable` |
+| `POST /auth/email/verify` | none | `{ "email": "ana@example.com", "code": "123456" }` → **200** `TokenResponse`, `isNew: true` when the account was made now. **400** `invalid-code` (wrong, expired or used; the attempt counts), **400** `code-burned` after 5 wrong attempts: ask for a new code |
+| `POST /auth/microsoft` | none | `{ "accessToken": "<Entra token for api://<client>/access_as_user>" }` → **200** `TokenResponse`. **401** `microsoft-token-invalid`, **503** `microsoft-unavailable` |
+| `POST /auth/refresh` | none | `{ "refreshToken": "…" }` → **200** `TokenResponse` with **both tokens new**; the old refresh token stops working. **401** `refresh-invalid`: expired, revoked, or already used (then its whole session is revoked): sign out |
+| `POST /auth/sign-out` | none | `{ "refreshToken": "…" }` → **204**, also for an unknown or revoked token. Ends that session |
+| `GET /me` | bearer | → **200** `Me`; **404** when the account is gone |
+| `POST /me` | bearer | installed apps only (Entra token): creates the account (**201**) or returns it (**200**). With our token: **200**, or **404** once deleted |
+| `DELETE /me` | bearer | → **204**, also when there was nothing to delete (see [Data](#data)) |
+| `POST /me/identities/upt-microsoft` | bearer | `{ "accessToken": "<Entra token>" }` → **200** `Me`. **409** `identity-in-use` (that UPT account belongs to another CampusPulse account; accounts aren't merged), **409** `already-linked` (this account has another UPT account), **401** `microsoft-token-invalid` |
+| `DELETE /me/identities/upt-microsoft` | bearer | → **204**, also when none is linked. **409** `last-sign-in-method` when the account has no verified email |
+| `GET /me/deadlines?from=&to=` | bearer | → **200** `[Deadline]` by `dueAt`; `from`/`to` optional instants, both included |
+| `POST /me/deadlines` | bearer | `{ "title": "Lab 3 report", "course": "MSA", "dueAt": "2026-11-30T21:59:00Z", "notes": "PDF" }` (`course`, `notes` optional) → **201** `Deadline`. **400** `invalid-deadline` (title 1-200, course ≤ 200, notes ≤ 2000), **409** `deadline-limit` (500 per student) |
+| `PATCH /me/deadlines/{id}` | bearer | any of `{ "title", "course", "dueAt", "notes", "done" }`; missing or null = unchanged, `""` clears `course`/`notes` → **200** `Deadline`; **404** for an id that isn't the student's |
+| `DELETE /me/deadlines/{id}` | bearer | → **204** |
+
+```jsonc
+// TokenResponse
+{ "accessToken": "eyJ…", "accessTokenExpiresAt": "2026-11-23T12:15:00+00:00",
+  "refreshToken": "q3V…43 chars", "refreshTokenExpiresAt": "2027-01-22T12:00:00+00:00",
+  "isNew": true, "user": /* Me */ }
+// Me (GET /me, and user above)
+{ "id": "01a1…", "email": "ana@example.com", "displayName": "Ana Pop",
+  "identities": [{ "provider": "upt-microsoft", "email": "ana.pop@student.upt.ro", "linkedAt": "2026-11-23T12:00:00+00:00" }],
+  "uptLinked": true }
+// Deadline
+{ "id": "01a1…", "title": "Lab 3 report", "course": "MSA", "dueAt": "2026-11-30T21:59:00+00:00", "notes": "PDF",
+  "done": false, "createdAt": "…", "updatedAt": "…" }
+```
+
+### Accounts, codes and sessions
+
+- **An account's email is verified**: confirmed with a code, or a UPT account's address when it is one of UPT's own
+  (`upt.ro` or a subdomain such as `student.upt.ro`). Microsoft doesn't vouch for a token's `email` claim, and a tenant
+  can put any address there, so a UPT token's other addresses are only shown on the identity: they link nothing and
+  open nothing. It is unique and stored normalized (trimmed, lowercase). An email account's first name is the
+  address's local part; linking UPT sets the UPT name.
+- **Codes:** 6 digits, valid **10 minutes**, **5 wrong attempts** then burned; a new code replaces the last; only a
+  salted SHA-256 is stored. An address gets **3 codes per 15 minutes and 10 a day**; `/auth/email/start` is also
+  limited per client IP (20 an hour), and every `/auth/*` call (60 a minute per IP): see [Rate limits](#rate-limits).
+- **Email sign-in finds** the account with that verified email, else one whose linked UPT account has it (a UPT
+  address), else makes a new one.
+- **UPT sign-in finds** the account of that UPT account; else **links automatically** to an account whose verified email
+  is the UPT account's (both addresses are verified, so it is the same person) and that has no UPT account yet; else
+  makes a new one, with the UPT address unless another account has it or it isn't a UPT one (then the account has no
+  email, and can only sign in with UPT until it gets one).
+- **Refresh tokens:** 256 random bits (base64url), stored as their SHA-256, **60 days** from each refresh, replaced on
+  every refresh. One sign-in on one device is one *family*; a token that was already replaced, shown again, means it was
+  copied, and revokes the family. Except for **one minute** after its replacement while the replacement is unused: then
+  the client never got that answer (a dropped connection) or sent two refreshes at once, and it gets new tokens again.
+  Clients still refresh one request at a time: a retry after that minute, or after the new token was used, signs the
+  device out.
+- Logged as counts only (`Email sign-in code sent`, `Signed in with UPT (new account: True)`, `A refresh token was used
+  again: its session was revoked`): never a code, a token or an address. An hourly job deletes expired refresh tokens
+  and an address's code row a day after its last code.
+- **Unconfigured:** without `Auth__SigningKey` (outside Development, where a key per process is made up) no session is
+  issued: `/auth/*` answers 503 `sign-in-unavailable` and only UPT Entra tokens work. Without `Auth__TenantId` /
+  `Auth__ClientId`, UPT tokens are refused and `/auth/microsoft` answers 503 `microsoft-unavailable`. Either way nothing
+  gets in anonymously; the start logs a warning.
+
+### UPT Microsoft (Entra) tokens
+
+A UPT token, as a bearer or in `/auth/microsoft` and linking (checked the same way in both), is accepted only if it:
 
 - is signed with RS256 by Microsoft (keys from the tenant's metadata);
 - has the issuer `https://login.microsoftonline.com/<tenant>/v2.0` exactly (v2 tokens; see below);
@@ -61,39 +144,36 @@ contract marks every other operation as needing the bearer token. The API accept
 - has `access_as_user` in `scp`, so app-only tokens and ID tokens are refused;
 - has an `oid` and hasn't expired.
 
-Anything else is 401, logged at Warning with the reason (never the token).
+Its email is `email`, else the UPN in `preferred_username`. **Who gets in with UPT:** every member of the tenant,
+students and staff alike. **At startup** the API loads the tenant's metadata in the background: one Information line if
+it can, an Error if it can't reach Microsoft; until it loads, requests with a UPT bearer answer 500 (a server fault, so
+clients don't send the student back to sign in) and `/auth/microsoft` answers 503.
 
-- **Who gets in:** every member of the tenant, students and staff alike. Students only would need a
-  further rule (for example on the account's domain or a group); that's a product decision.
-- `POST /me` creates the signed-in student's account (keyed by `oid`), or returns the one they
-  have: **201** when it was created, **200** when it existed, with the body `{ id, email,
-  displayName }` either way.
-- `GET /me` returns that same body, and **never creates an account**: no account answers **404**
-  (ProblemDetails). Both refresh email and name when the token carries them.
-- `DELETE /me` deletes the signed-in student's account and everything stored about them (see
-  [Data](#data)) and answers **204**, also when there was nothing to delete, so retrying is safe.
-- **What clients must do:**
-  - Call `POST /me` once, right after an **interactive** sign-in. Never on app start or after a
-    silent token refresh. Otherwise a second device that still holds tokens would silently re-create
-    an account the student deleted on the first.
-  - Treat a **404 from `GET /me`** as "this account no longer exists" (deleted, maybe from another
-    device): sign out locally, drop cached data and show sign-in.
-  - After a **204 from `DELETE /me`**, sign out locally right away: drop the tokens and the cached
-    data. The access token stays valid until it expires.
-  - Send a random `X-Request-Id` per request, or none, never one fixed per install: a stable id
-    would tie all of a student's log lines together, a deleted student's included.
-- **Unconfigured** (no `Auth__TenantId` / `Auth__ClientId`): the API still starts and logs a
-  warning, and every endpoint that needs sign-in answers 401. It never lets a request through
-  anonymously.
-- **At startup** the API loads the tenant's metadata in the background: one Information line if it
-  can, an Error if it can't reach Microsoft. It still starts, and requests with a token answer 500
-  (a server fault, so clients don't send the student back to sign in) until the metadata loads.
-- **Clients** use the authority `https://login.microsoftonline.com/<tenant>` (not `/common`, which a
-  single-tenant app refuses with AADSTS50194) and request the scopes
-  `openid profile offline_access api://<client-id>/access_as_user`. Without `profile` the token may
-  lack the name and email; `offline_access` gives the refresh token.
+### What clients must do
 
-**Registering the app (once, by Sebastian, signed in with his `@student.upt.ro` account):** a test
+- **Sign-in screen:** "Continue with UPT" (the Microsoft flow, then `POST /auth/microsoft` with its access token), or
+  email → `POST /auth/email/start` → the 6-digit code → `POST /auth/email/verify`. Offer "resend" after
+  `resendAfterSeconds`; show `invalid-code` and `code-burned`.
+- **Keep our refresh token** (mobile: SecureStore; web: localStorage), send our access token as the bearer, refresh
+  before `accessTokenExpiresAt` and retry once on a 401. **One refresh at a time** (a retry of a lost refresh within a
+  minute is fine). When refresh answers 401, sign out
+  locally. On sign-out call `POST /auth/sign-out` with the refresh token, then drop both.
+- **Link UPT:** run the Microsoft flow, then `POST /me/identities/upt-microsoft` with its access token. Unlink with
+  `DELETE`, after a confirmation; the server refuses unlinking the last sign-in method.
+- Treat a **404 from `GET /me`** as "this account no longer exists" (deleted, maybe from another device): sign out
+  locally, drop cached data and show sign-in. After a **204 from `DELETE /me`**, sign out locally right away.
+- **Installed versions** that still send Entra tokens keep working: `POST /me` once right after an interactive sign-in
+  (never on app start, or a second device would re-create an account deleted on the first), then the Entra token as the
+  bearer.
+- Send a random `X-Request-Id` per request, or none, never one fixed per install: a stable id
+  would tie all of a student's log lines together, a deleted student's included.
+- **Microsoft's authority** is `https://login.microsoftonline.com/<tenant>` (not `/common`, which a single-tenant app
+  refuses with AADSTS50194), with the scopes `openid profile offline_access api://<client-id>/access_as_user`. Without
+  `profile` the token may lack the name and email.
+
+### Registering the UPT app
+
+Once, by Sebastian, signed in with his `@student.upt.ro` account: a test
 on 2026-10-14 showed UPT lets students register apps and consent to their own organisation's apps.
 
 1. entra.microsoft.com → App registrations → New registration: name `CampusPulse`, **single tenant**
@@ -176,10 +256,27 @@ clients follow `main`.
 
 ## Data
 
-- `users`: one row per student who has signed in (`oid`, email, name, first and last seen).
+- `users`: one row per account (CampusPulse-ro/api#63): `id`, `verified_email` (normalized, unique; null for an
+  account made with UPT whose address another account had or isn't a UPT one), name, first and last seen.
+  - Two columns are the previous release's, kept so it still works on this schema after a rollback (a rollback
+    restores code, not schema): `entra_object_id`, the UPT account's `oid` while one is linked (now nullable, still
+    unique), and `email` (non-null, not unique; this release keeps it equal to `verified_email`, `''` for none, and never
+    reads it). Accounts made by email have no `entra_object_id`, so the previous release doesn't see them. Both columns go
+    in a later release (contract).
+- `user_identities`: the sign-in methods linked to an account other than its email: one `upt-microsoft` row (`subject`
+  = the `oid`, unique per provider; the UPT account's email; when it was linked). The migration made one for every
+  existing account.
+- `email_sign_in_codes`: per address (normalized; not a key to `users`, since an address that has no account can ask
+  for a code): the live code's salted SHA-256, its expiry and failed attempts, and when the last codes were sent (the
+  per-address limit). Deleted by the hourly cleanup a day after the last code, and by `DELETE /me` for the account's
+  addresses.
+- `refresh_tokens`: SHA-256 of each refresh token, its family (one sign-in on one device), the sign-in method,
+  expiry, when it was revoked and what replaced it. Expired rows are deleted hourly.
+- `deadlines`: a student's manual deadlines (title, course, due, notes, done). At most 500 per student.
 - **Everything about a student refers to their `users` row with ON DELETE CASCADE.** `DELETE /me`
-  deletes that row, and the database deletes the rest with it: settings, device push tokens,
-  Campus Virtual tokens, any later table. In EF that's `.OnDelete(DeleteBehavior.Cascade)`, the
+  deletes that row, and the database deletes the rest with it: identities, refresh tokens (so every session ends),
+  deadlines, settings, device push tokens, any later table. The account's sign-in code rows (keyed by address, not by
+  account) are deleted in the same transaction. In EF that's `.OnDelete(DeleteBehavior.Cascade)`, the
   default for a required relationship; `ClientCascade` is not enough, because the delete doesn't
   go through EF's change tracker. The rule covers the whole tree under `users`: a table that
   refers to a per-user table (device tokens under devices) cascades from it too.
@@ -332,6 +429,28 @@ says reminders are off.
 it with `PUT /me/reminders`. Open the class when a notification with `data.type == "classReminder"` is tapped.
 Reminders reach only registered devices (`POST /me/devices`).
 
+## Email sender
+
+Sign-in codes are the only email the API sends (`IEmailSender`, chosen at startup by `AddCampusPulseEmail`):
+
+- **Resend** when `Email__ResendApiKey` is set: `POST https://api.resend.com/emails` with the key as the bearer, from
+  `Email__From`, a 15 s timeout. Like Entra and Expo it goes out through the Pi's egress proxy, so `api.resend.com` is
+  on [`deploy/pi/egress-allow`](deploy/pi/egress-allow) (installing that line on the Pi is a manual step: see
+  [deploy/pi/README.md](deploy/pi/README.md#egress-proxy)). The sender's domain (`campuspulse.thorsp.net` by default)
+  must be verified at Resend (its SPF and DKIM records in the DNS), or Resend refuses every email.
+- **The log**, in Development without a key: the email's text, code included, is logged at Warning, so a local run
+  can sign in without an email account. Never anywhere else.
+- **None** otherwise: `POST /auth/email/start` answers 503 `email-unavailable` (the start logs a warning), and UPT
+  sign-in still works.
+
+The email is plain text with a minimal HTML copy, in English or Romanian (`language` in the request): the subject
+carries the code ("Your CampusPulse code: 123456", "Codul tău CampusPulse: 123456") so it shows in a notification, and
+there are **no links** in it, so a phished copy has nothing to click. When Resend refuses or can't be reached the
+request answers 503 `email-unavailable` and the new code is withdrawn: it doesn't count against the address's limit and
+can't be used, and the code it replaced (an earlier email's, still within its 10 minutes) works again. The send isn't
+tied to the request, so a client that disconnects can't leave a code issued and counted behind. Logged: `Resend refused an email: HTTP 422` or `Resend couldn't be reached: <exception type>`, never
+the address, the code or Resend's answer (which may quote them).
+
 ## Timetable
 
 The AC faculty's timetable for a semester (CampusPulse-ro/api#5), loaded by a one-off import:
@@ -450,10 +569,17 @@ ASP.NET Core's rate limiter with token buckets in memory (`RateLimitSetup`). A b
 
 | Bucket | Counted per | Burst / per minute | Takes from |
 |---|---|---|---|
-| `SignedIn` | student (the token's `oid`) | 100 / 100 | every request with a valid token |
-| `Anonymous` | client IP (an IPv6 address by its /64) | 300 / 300 | every request without one: readiness checks, the contract, refused tokens |
-| `Writes` | student, else IP | 30 / 30 | every POST, PUT, PATCH, DELETE, first |
-| `Account` | student | 10 / 1 | `POST /me` and `DELETE /me`, as well |
+| `SignedIn` | student (the account, or for a UPT Entra bearer its `oid`) | 100 / 100 | every request with a valid token |
+| `Anonymous` | client IP (an IPv6 address by its /64) | 300 / 300 | every request without one: readiness checks, the contract, refused tokens, `/auth/*` |
+| `Writes` | student, else IP | 30 / 30 | every POST, PUT, PATCH, DELETE outside `/auth`, first |
+| `Auth` | client IP | 60 / 60 | every `/auth/*` request, first (instead of `Writes`: signing in is anonymous, and a shared network shouldn't share 30 a minute) |
+| `Account` | student | 10 / 1 | `POST /me`, `DELETE /me`, `POST`/`DELETE /me/identities/upt-microsoft`, as well |
+
+`POST /auth/email/start` is also limited to **20 an hour per client IP** (a fixed window, `RateLimits:EmailStart`), and
+each address to **3 codes per 15 minutes and 10 a day**: that limit is in the database (an address's row in
+`email_sign_in_codes`), so it holds across restarts and instances, and answers 429 `too-many-codes` with `Retry-After`
+until the oldest counted code leaves the window. The per-IP numbers are a guess for one campus behind one NAT: for a
+lab, raise `RateLimits__EmailStart__Limit`.
 
 - A refused request is a **429** ProblemDetails with `Retry-After` (seconds), which browsers can read (CORS exposes it).
   Clients wait that long before retrying.

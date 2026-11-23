@@ -1,24 +1,38 @@
 using System.Security.Claims;
+using CampusPulse.Api.Accounts;
+using CampusPulse.Api.Auth;
 using CampusPulse.Api.Http;
 using CampusPulse.Api.RateLimiting;
 using CampusPulse.Domain.Users;
 using CampusPulse.Infrastructure;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.EntityFrameworkCore;
-using Npgsql;
 
 namespace CampusPulse.Api.Users;
 
-/// <summary>Body of <c>GET /me</c> and <c>POST /me</c>: the signed-in student.</summary>
-public sealed record MeResponse(Guid Id, string Email, string DisplayName)
+/// <summary>A sign-in method linked to the account (today only <c>upt-microsoft</c>), with the email the provider
+/// gives.</summary>
+public sealed record IdentityResponse(string Provider, string? Email, DateTimeOffset LinkedAt);
+
+/// <summary>Body of <c>GET /me</c> and <c>POST /me</c>, and <c>user</c> in every sign-in: the account.
+/// <see cref="Email"/> is its verified email (null for an account made with UPT whose address another account has);
+/// <see cref="UptLinked"/>: a UPT Microsoft account is linked.</summary>
+public sealed record MeResponse(Guid Id, string? Email, string DisplayName, IReadOnlyList<IdentityResponse> Identities, bool UptLinked)
 {
-    internal static MeResponse From(User user) => new(user.Id, user.Email, user.DisplayName);
+    internal static async Task<MeResponse> OfAsync(CampusPulseDbContext db, User user, CancellationToken cancellationToken)
+    {
+        var identities = await db.UserIdentities.AsNoTracking().Where(i => i.UserId == user.Id).OrderBy(i => i.LinkedAt)
+            .Select(i => new IdentityResponse(i.Provider, i.Email, i.LinkedAt)).ToListAsync(cancellationToken);
+        return new MeResponse(user.Id, user.Email, user.DisplayName, identities,
+            identities.Any(i => i.Provider == UserIdentity.UptMicrosoft));
+    }
 }
 
 /// <summary>
-/// The signed-in student's own account. Reading it (<c>GET</c>) never creates it: only <c>POST</c>,
-/// which clients call right after an interactive sign-in. Otherwise a second device that still holds
-/// tokens would silently re-create an account the student deleted elsewhere.
+/// The signed-in student's own account, with either token (ours, or a UPT Entra token from an installed app version).
+/// Reading it (<c>GET</c>) never creates it. With a UPT Entra token, <c>POST</c> creates it, as installed apps call it
+/// right after an interactive sign-in; never on app start, or a second device that still holds tokens would silently
+/// re-create an account the student deleted elsewhere. Our sign-ins create accounts in <c>/auth/*</c>.
 /// </summary>
 public static partial class MeEndpoint
 {
@@ -29,8 +43,8 @@ public static partial class MeEndpoint
         app.MapGet("/me", GetMe)
             .RequireAuthorization()
             .WithName("GetMe")
-            .WithHttpCaching(HttpCacheScope.PerStudent)
             .WithTags("Users")
+            .WithHttpCaching(HttpCacheScope.PerStudent)
             .ProducesProblem(StatusCodes.Status404NotFound)
             .Produces(StatusCodes.Status401Unauthorized);
 
@@ -39,6 +53,7 @@ public static partial class MeEndpoint
             .RequireRateLimiting(RateLimitSetup.AccountPolicy)
             .WithName("CreateMe")
             .WithTags("Users")
+            .ProducesProblem(StatusCodes.Status404NotFound)
             .Produces(StatusCodes.Status401Unauthorized);
 
         app.MapDelete("/me", DeleteMe)
@@ -48,89 +63,78 @@ public static partial class MeEndpoint
             .WithTags("Users")
             .Produces(StatusCodes.Status401Unauthorized);
 
+        app.MapPost("/me/identities/upt-microsoft", LinkUpt)
+            .RequireAuthorization()
+            .RequireRateLimiting(RateLimitSetup.AccountPolicy)
+            .WithName("LinkUpt")
+            .WithTags("Users")
+            .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .ProducesProblem(StatusCodes.Status404NotFound)
+            .ProducesProblem(StatusCodes.Status409Conflict)
+            .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+        app.MapDelete("/me/identities/upt-microsoft", UnlinkUpt)
+            .RequireAuthorization()
+            .RequireRateLimiting(RateLimitSetup.AccountPolicy)
+            .WithName("UnlinkUpt")
+            .WithTags("Users")
+            .ProducesProblem(StatusCodes.Status404NotFound)
+            .ProducesProblem(StatusCodes.Status409Conflict)
+            .Produces(StatusCodes.Status401Unauthorized);
+
         return app;
     }
 
     /// <summary>
-    /// The signed-in student, or 404 when they have no account: never created, or deleted (maybe
-    /// from another device, maybe by a DELETE overlapping this request). A client reads the 404 as
-    /// "this account no longer exists" and signs out. Refreshes email and name when the token has
-    /// them and they changed (a token requested without the <c>profile</c> scope may lack
-    /// <c>name</c> and <c>preferred_username</c>), and the last-seen time at most every few minutes.
+    /// The signed-in student, or 404 when they have no account: never created, or deleted (maybe from another device,
+    /// maybe by a DELETE overlapping this request). A client reads the 404 as "this account no longer exists" and signs
+    /// out. Refreshes the last-seen time at most every few minutes, and with a UPT Entra token the name it carries.
     /// </summary>
     internal static async Task<Results<Ok<MeResponse>, ProblemHttpResult>> GetMe(ClaimsPrincipal principal,
         CampusPulseDbContext db, TimeProvider time, CancellationToken cancellationToken)
     {
-        var identity = Identity.From(principal);
-
-        var user = await db.Users.SingleOrDefaultAsync(u => u.EntraObjectId == identity.Oid, cancellationToken);
-        if (user is null || !await TrySeen(db, user, identity, time.GetUtcNow(), cancellationToken))
+        var user = await Caller.Users(db, principal).FirstOrDefaultAsync(cancellationToken);
+        var name = Caller.IsUpt(principal) ? UptClaims.From(principal).Name : null;
+        if (user is null || !await TrySeen(db, user, name, time.GetUtcNow(), cancellationToken))
         {
             return NoAccount();
         }
 
-        return TypedResults.Ok(MeResponse.From(user));
+        return TypedResults.Ok(await MeResponse.OfAsync(db, user, cancellationToken));
     }
 
     /// <summary>
-    /// Creates the signed-in student's account, or returns the one they have: 201 when created, 200
-    /// when it existed, with GET's body either way. Clients call it once after an interactive
-    /// sign-in, never on app start or a silent token refresh. Two first calls at once can't make two
-    /// rows: the unique index refuses the second insert, which then returns the row the first one
-    /// made. If that row is already gone (deleted in between), the insert is tried once more.
+    /// With a UPT Entra token (installed app versions): creates the student's account, or returns the one their UPT
+    /// account has (201 when created, 200 when it existed), linking it to an account with the same verified email as
+    /// <c>POST /auth/microsoft</c> does. Two first calls at once make one account. With our token the account exists
+    /// already: 200, or 404 once it is deleted.
     /// </summary>
-    internal static async Task<Results<Created<MeResponse>, Ok<MeResponse>>> CreateMe(ClaimsPrincipal principal,
+    internal static async Task<Results<Created<MeResponse>, Ok<MeResponse>, ProblemHttpResult>> CreateMe(ClaimsPrincipal principal,
         CampusPulseDbContext db, TimeProvider time, CancellationToken cancellationToken)
     {
-        var identity = Identity.From(principal);
-        var now = time.GetUtcNow();
-
-        for (var attempt = 1; ; attempt++)
+        if (!Caller.IsUpt(principal))
         {
-            var existing = await db.Users.SingleOrDefaultAsync(u => u.EntraObjectId == identity.Oid, cancellationToken);
-            if (existing is not null && await TrySeen(db, existing, identity, now, cancellationToken))
-            {
-                return TypedResults.Ok(MeResponse.From(existing));
-            }
-
-            // No row, or it was deleted between the read and the update: create the account.
-            var user = new User(identity.Oid, identity.Email, identity.Name, now);
-            db.Users.Add(user);
-            try
-            {
-                await db.SaveChangesAsync(cancellationToken);
-                return TypedResults.Created("/me", MeResponse.From(user));
-            }
-            catch (DbUpdateException e) when (e.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })
-            {
-                db.ChangeTracker.Clear();
-                var winner = await db.Users.SingleOrDefaultAsync(u => u.EntraObjectId == identity.Oid, cancellationToken);
-                if (winner is not null)
-                {
-                    return TypedResults.Ok(MeResponse.From(winner));
-                }
-
-                if (attempt == 2)
-                {
-                    throw;
-                }
-            }
+            var user = await Caller.Users(db, principal).AsNoTracking().FirstOrDefaultAsync(cancellationToken);
+            return user is null ? NoAccount() : TypedResults.Ok(await MeResponse.OfAsync(db, user, cancellationToken));
         }
+
+        var (account, created) = await SignIn.UptAsync(db, UptClaims.From(principal), time.GetUtcNow(), cancellationToken);
+        var body = await MeResponse.OfAsync(db, account, cancellationToken);
+        return created ? TypedResults.Created("/me", body) : TypedResults.Ok(body);
     }
 
     /// <summary>
-    /// Deletes the signed-in student's account and everything stored about them, keeping only a
-    /// count per UTC day (<see cref="AccountDeletion"/>). 204 also when there is nothing to delete, so
-    /// a retry after a lost response is safe. The deleting client signs out right after: its token
-    /// stays valid until it expires.
+    /// Deletes the signed-in student's account and everything stored about them, keeping only a count per UTC day
+    /// (<see cref="AccountDeletion"/>). 204 also when there is nothing to delete, so a retry after a lost response is
+    /// safe. The deleting client signs out right after: its access token stays valid until it expires, but finds no
+    /// account, and its refresh tokens are gone.
     /// </summary>
     internal static async Task<NoContent> DeleteMe(ClaimsPrincipal principal, CampusPulseDbContext db,
         TimeProvider time, ILoggerFactory loggers, CancellationToken cancellationToken)
     {
-        var identity = Identity.From(principal);
         var day = DateOnly.FromDateTime(time.GetUtcNow().UtcDateTime);
-
-        if (await db.DeleteAccountAsync(identity.Oid, day, cancellationToken))
+        if (await Caller.IdAsync(db, principal, cancellationToken) is { } userId
+            && await db.DeleteAccountAsync(userId, day, cancellationToken))
         {
             LogAccountDeleted(loggers.CreateLogger(LogCategory));
         }
@@ -138,13 +142,114 @@ public static partial class MeEndpoint
         return TypedResults.NoContent();
     }
 
-    /// <summary>Records a sign-in on a row this context loaded. False when the row was deleted after
-    /// it was read (a DELETE /me overlapping this request): the update then matches no row, and the
-    /// context is cleared so nothing of it is saved later.</summary>
-    private static async Task<bool> TrySeen(CampusPulseDbContext db, User user, Identity identity,
-        DateTimeOffset now, CancellationToken cancellationToken)
+    /// <summary>
+    /// Links a UPT Microsoft account (its Entra access token in the body) to the signed-in account, and answers the
+    /// account. 200 also when it was linked already. 409 <c>identity-in-use</c> when that UPT account belongs to another
+    /// CampusPulse account (accounts aren't merged), 409 <c>already-linked</c> when this account has a different UPT
+    /// account; 401 <c>microsoft-token-invalid</c>; 503 <c>microsoft-unavailable</c>. An account without a verified
+    /// email gets the UPT account's, when it is a UPT address and no other account has it.
+    /// </summary>
+    internal static async Task<Results<Ok<MeResponse>, ProblemHttpResult>> LinkUpt(MicrosoftTokenRequest request,
+        ClaimsPrincipal principal, CampusPulseDbContext db, EntraTokenValidator entra, TimeProvider time, ILoggerFactory loggers,
+        CancellationToken cancellationToken)
     {
-        if (!user.Seen(identity.Email, identity.Name, now))
+        var user = await Caller.Users(db, principal).FirstOrDefaultAsync(cancellationToken);
+        if (user is null)
+        {
+            return NoAccount();
+        }
+
+        var (check, token) = await entra.ValidateAsync(request.AccessToken, cancellationToken);
+        if (check != EntraCheck.Valid)
+        {
+            return AuthEndpoints.MicrosoftProblem(check);
+        }
+
+        var upt = UptClaims.From(token!);
+        var now = time.GetUtcNow();
+        var owner = await db.UserIdentities.Where(i => i.Provider == UserIdentity.UptMicrosoft && i.Subject == upt.Oid)
+            .Select(i => (Guid?)i.UserId).SingleOrDefaultAsync(cancellationToken)
+            ?? await db.Users.Where(u => u.EntraObjectId == upt.Oid).Select(u => (Guid?)u.Id).FirstOrDefaultAsync(cancellationToken);
+        if (owner == user.Id && await db.UserIdentities.AnyAsync(i => i.UserId == user.Id && i.Subject == upt.Oid, cancellationToken))
+        {
+            return TypedResults.Ok(await MeResponse.OfAsync(db, user, cancellationToken));
+        }
+
+        if (owner is not null && owner != user.Id)
+        {
+            return IdentityInUse();
+        }
+
+        if (await db.UserIdentities.AnyAsync(i => i.UserId == user.Id && i.Provider == UserIdentity.UptMicrosoft, cancellationToken))
+        {
+            return Problems.Of(StatusCodes.Status409Conflict, "already-linked", "Another UPT account is linked",
+                "This account already has a UPT account. Unlink it first.");
+        }
+
+        user.LinkUpt(upt.Oid);
+        user.Seen(upt.Name, now);
+        if (user.Email is null && upt.VerifiedEmail is { } email && !await db.Users.AnyAsync(u => u.Email == email, cancellationToken))
+        {
+            user.VerifyEmail(email);
+        }
+
+        db.UserIdentities.Add(new UserIdentity(user.Id, UserIdentity.UptMicrosoft, upt.Oid, upt.Email, now));
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException e) when (SignIn.IsUniqueViolation(e))
+        {
+            // Linked to another account, or given this address, by a request at the same moment.
+            return IdentityInUse();
+        }
+
+        LogUptLinked(loggers.CreateLogger(LogCategory));
+        return TypedResults.Ok(await MeResponse.OfAsync(db, user, cancellationToken));
+    }
+
+    /// <summary>Unlinks the account's UPT Microsoft account: 204, also when none was linked. 409
+    /// <c>last-sign-in-method</c> when the account has no verified email, since it couldn't sign in again.</summary>
+    internal static async Task<Results<NoContent, ProblemHttpResult>> UnlinkUpt(ClaimsPrincipal principal, CampusPulseDbContext db,
+        ILoggerFactory loggers, CancellationToken cancellationToken)
+    {
+        var user = await Caller.Users(db, principal).FirstOrDefaultAsync(cancellationToken);
+        if (user is null)
+        {
+            return NoAccount();
+        }
+
+        var identity = await db.UserIdentities.SingleOrDefaultAsync(i => i.UserId == user.Id && i.Provider == UserIdentity.UptMicrosoft,
+            cancellationToken);
+        if (identity is null && user.EntraObjectId is null)
+        {
+            return TypedResults.NoContent();
+        }
+
+        if (user.Email is null)
+        {
+            return Problems.Of(StatusCodes.Status409Conflict, "last-sign-in-method", "UPT is the only way to sign in",
+                "This account has no verified email, so it couldn't sign in without UPT. Sign in with an email code first.");
+        }
+
+        if (identity is not null)
+        {
+            db.UserIdentities.Remove(identity);
+        }
+
+        user.UnlinkUpt();
+        await db.SaveChangesAsync(cancellationToken);
+        LogUptUnlinked(loggers.CreateLogger(LogCategory));
+        return TypedResults.NoContent();
+    }
+
+    /// <summary>Records a request on a row this context loaded. False when the row was deleted after it was read (a
+    /// DELETE /me overlapping this request): the update then matches no row, and the context is cleared so nothing of
+    /// it is saved later.</summary>
+    private static async Task<bool> TrySeen(CampusPulseDbContext db, User user, string? name, DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        if (!user.Seen(name, now))
         {
             return true;
         }
@@ -162,33 +267,25 @@ public static partial class MeEndpoint
     }
 
     /// <summary>The signed-in student's account, or null when they have none (answer <see cref="NoAccount"/>). Read
-    /// only (not tracked): callers use it to know who is asking. <see cref="GetMe"/> and <see cref="CreateMe"/> load
-    /// their own tracked row, since they update it.</summary>
-    internal static Task<User?> FindUserAsync(CampusPulseDbContext db, ClaimsPrincipal principal, CancellationToken cancellationToken)
-    {
-        var oid = Identity.From(principal).Oid;
-        return db.Users.AsNoTracking().SingleOrDefaultAsync(u => u.EntraObjectId == oid, cancellationToken);
-    }
+    /// only (not tracked): callers use it to know who is asking.</summary>
+    internal static Task<User?> FindUserAsync(CampusPulseDbContext db, ClaimsPrincipal principal, CancellationToken cancellationToken) =>
+        Caller.Users(db, principal).AsNoTracking().FirstOrDefaultAsync(cancellationToken);
 
     internal static ProblemHttpResult NoAccount() => TypedResults.Problem(
         statusCode: StatusCodes.Status404NotFound,
         title: "No account",
-        detail: "This Microsoft account has no CampusPulse account: it was deleted or never created. Sign out; signing in again creates a new one.");
+        detail: "This sign-in has no CampusPulse account: it was deleted or never created. Sign out; signing in again creates a new one.");
+
+    private static ProblemHttpResult IdentityInUse() => Problems.Of(StatusCodes.Status409Conflict, "identity-in-use",
+        "UPT account in use", "This UPT account belongs to another CampusPulse account. Sign in with it there, or unlink it there first.");
 
     // No identifier of any kind: the student is gone.
     [LoggerMessage(EventId = 20, Level = LogLevel.Information, Message = "Account deleted")]
     private static partial void LogAccountDeleted(ILogger logger);
 
-    /// <summary>What the API takes from the validated token.</summary>
-    internal sealed record Identity(string Oid, string? Email, string? Name)
-    {
-        public static Identity From(ClaimsPrincipal principal) => new(
-            principal.FindFirst("oid")?.Value
-                ?? throw new InvalidOperationException("An authenticated principal without oid (the token check should have refused it)."),
-            FirstNonEmpty(principal, "email", "preferred_username"),
-            FirstNonEmpty(principal, "name"));
+    [LoggerMessage(EventId = 21, Level = LogLevel.Information, Message = "UPT account linked")]
+    private static partial void LogUptLinked(ILogger logger);
 
-        private static string? FirstNonEmpty(ClaimsPrincipal principal, params string[] claimTypes) =>
-            claimTypes.Select(type => principal.FindFirst(type)?.Value?.Trim()).FirstOrDefault(value => !string.IsNullOrEmpty(value));
-    }
+    [LoggerMessage(EventId = 22, Level = LogLevel.Information, Message = "UPT account unlinked")]
+    private static partial void LogUptUnlinked(ILogger logger);
 }

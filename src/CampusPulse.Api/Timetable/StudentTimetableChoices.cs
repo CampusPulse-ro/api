@@ -1,3 +1,5 @@
+using System.Security.Claims;
+using CampusPulse.Api.Users;
 using CampusPulse.Domain.Timetable;
 using CampusPulse.Infrastructure;
 using Microsoft.EntityFrameworkCore;
@@ -24,10 +26,10 @@ public sealed record StudentTimetableChoices(Guid UserId, Guid? StudyGroupId, IR
 
     /// <summary>The signed-in student's choices, or null when they have no account: their <c>users</c> row, group and
     /// subjects in one query (one round trip to the database).</summary>
-    public static async Task<StudentTimetableChoices?> ForOidAsync(CampusPulseDbContext db, string oid, CancellationToken cancellationToken)
+    public static async Task<StudentTimetableChoices?> ForCallerAsync(CampusPulseDbContext db, ClaimsPrincipal principal,
+        CancellationToken cancellationToken)
     {
-        var row = await db.Users.AsNoTracking()
-            .Where(u => u.EntraObjectId == oid)
+        var row = await Caller.Users(db, principal).AsNoTracking()
             .Select(u => new
             {
                 u.Id,

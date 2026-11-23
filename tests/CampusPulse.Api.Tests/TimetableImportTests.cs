@@ -75,7 +75,7 @@ public sealed class TimetableImportTests(PostgresAppFactory factory) : IClassFix
         await using var db = factory.CreateDbContext();
         var now = DateTimeOffset.UtcNow;
         var oid = "oid-" + Guid.NewGuid().ToString("N");
-        var user = new User(oid, "ana@student.example", "Ana", now);
+        var user = User.FromUpt(oid, $"{oid}@student.example", "Ana", now);
         db.Users.Add(user);
         var settings = new StudentSettings(user.Id, now);
         settings.SetStudyGroup(groupId, now);

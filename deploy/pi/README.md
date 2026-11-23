@@ -96,15 +96,16 @@ The guard lets the app users reach nothing outside the Pi. For the few services 
 goes through **tinyproxy** on `127.0.0.1:8899` ([`tinyproxy.conf`](tinyproxy.conf)): HTTPS (CONNECT to
 port 443) only, default-deny, to hosts listed in [`egress-allow`](egress-allow) as `^host:443$`
 (`FilterURLs On`: plain-HTTP requests never match, so they're refused too). Today that's
-`login.microsoftonline.com` (sign-in metadata and keys) and `exp.host` (Expo's push API: sending
-notifications and reading their receipts). The env files set `HTTPS_PROXY=http://127.0.0.1:8899` and
-`NO_PROXY=127.0.0.1,localhost`. On Linux, .NET's `HttpClient.DefaultProxy` is read from exactly these
+`login.microsoftonline.com` (sign-in metadata and keys), `exp.host` (Expo's push API: sending
+notifications and reading their receipts) and `api.resend.com` (sign-in codes by email). The env files set
+`HTTPS_PROXY=http://127.0.0.1:8899` and `NO_PROXY=127.0.0.1,localhost`. On Linux, .NET's `HttpClient.DefaultProxy` is read from exactly these
 variables, and the API's clients don't set a proxy of their own (a test checks the push client keeps the
 default). Anything that bypassed the proxy would be refused by the guard and fail loudly.
 
 **Installing a new allow-list line is a manual step**, like the units: merging a PR that adds a host to
 `egress-allow` changes nothing on the Pi until someone runs the install below. Until then, requests to that
-host are refused (for push: the test notification answers 502 and receipt checks log a warning).
+host are refused (for push: the test notification answers 502 and receipt checks log a warning; for Resend:
+`POST /auth/email/start` answers 503 `email-unavailable` and logs `Resend couldn't be reached`).
 
 To allow a new host (push notifications, error reporting): add one `^host\.name:443$` line to `egress-allow` in
 the same PR as the feature, then on the Pi `sudo install -m 644 deploy/pi/egress-allow

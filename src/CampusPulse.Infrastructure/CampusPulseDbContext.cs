@@ -1,3 +1,4 @@
+using CampusPulse.Domain.Deadlines;
 using CampusPulse.Domain.Push;
 using CampusPulse.Domain.Reminders;
 using CampusPulse.Domain.Timetable;
@@ -13,6 +14,14 @@ public sealed class CampusPulseDbContext(DbContextOptions<CampusPulseDbContext> 
     public DbSet<User> Users => Set<User>();
 
     public DbSet<AccountDeletionCount> AccountDeletionCounts => Set<AccountDeletionCount>();
+
+    public DbSet<UserIdentity> UserIdentities => Set<UserIdentity>();
+
+    public DbSet<EmailSignInCode> EmailSignInCodes => Set<EmailSignInCode>();
+
+    public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
+
+    public DbSet<Deadline> Deadlines => Set<Deadline>();
 
     public DbSet<PushDevice> PushDevices => Set<PushDevice>();
 
@@ -51,11 +60,15 @@ public sealed class CampusPulseDbContext(DbContextOptions<CampusPulseDbContext> 
             user.ToTable("users");
             user.HasKey(u => u.Id);
             user.Property(u => u.Id).ValueGeneratedNever();
-            user.Property(u => u.EntraObjectId).HasMaxLength(User.EntraObjectIdMaxLength).IsRequired();
-            // One row per Microsoft account, enforced by the database: two first sign-ins at the
-            // same moment can't both insert.
+            // The previous release's key (see User): nullable now, unique while set. Identities are the key now.
+            user.Property(u => u.EntraObjectId).HasMaxLength(User.EntraObjectIdMaxLength);
             user.HasIndex(u => u.EntraObjectId).IsUnique();
-            user.Property(u => u.Email).HasMaxLength(User.EmailMaxLength).IsRequired();
+            // The account's verified email, stored normalized (trimmed, lowercase), so unique whatever the case. A new
+            // column: users.email stays the previous release's (non-null, not unique, written by it with any token's
+            // address), so that release still reads and creates accounts after a rollback.
+            user.Property(u => u.Email).HasColumnName("verified_email").HasMaxLength(User.EmailMaxLength);
+            user.HasIndex(u => u.Email).IsUnique();
+            user.Property(u => u.LegacyEmail).HasColumnName("email").HasMaxLength(User.EmailMaxLength).IsRequired();
             user.Property(u => u.DisplayName).HasMaxLength(User.DisplayNameMaxLength).IsRequired();
             // Every table holding a student's data refers to this one with ON DELETE CASCADE, so
             // deleting the row deletes the account (AccountDeletion). A test fails otherwise.
@@ -95,6 +108,62 @@ public sealed class CampusPulseDbContext(DbContextOptions<CampusPulseDbContext> 
 
         OnTimetableCreating(modelBuilder);
         OnRemindersCreating(modelBuilder);
+        OnAccountsCreating(modelBuilder);
+    }
+
+    /// <summary>Accounts (CampusPulse-ro/api#63): sign-in methods linked to an account, email sign-in codes, refresh
+    /// tokens, and the student's own deadlines. All under <c>users</c> with ON DELETE CASCADE except the codes, which
+    /// are per email address (an address may have no account yet); account deletion deletes those itself.</summary>
+    private static void OnAccountsCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<UserIdentity>(identity =>
+        {
+            identity.ToTable("user_identities");
+            // A provider's account belongs to one CampusPulse account; an account has one of each provider.
+            identity.HasKey(i => new { i.Provider, i.Subject });
+            identity.HasIndex(i => new { i.UserId, i.Provider }).IsUnique();
+            identity.HasIndex(i => i.Email);
+            identity.Property(i => i.Provider).HasMaxLength(UserIdentity.ProviderMaxLength);
+            identity.Property(i => i.Subject).HasMaxLength(UserIdentity.SubjectMaxLength);
+            identity.Property(i => i.Email).HasMaxLength(User.EmailMaxLength);
+            identity.HasOne<User>().WithMany().HasForeignKey(i => i.UserId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<EmailSignInCode>(code =>
+        {
+            code.ToTable("email_sign_in_codes");
+            code.HasKey(c => c.Email);
+            code.Property(c => c.Email).HasMaxLength(User.EmailMaxLength);
+            code.Property(c => c.CodeHash).HasMaxLength(32);
+            code.Property(c => c.Salt).HasMaxLength(16);
+            // The cleanup deletes rows a day after their last code.
+            code.HasIndex(c => c.CreatedAt);
+        });
+
+        modelBuilder.Entity<RefreshToken>(token =>
+        {
+            token.ToTable("refresh_tokens");
+            token.HasKey(t => t.TokenHash);
+            token.Property(t => t.TokenHash).HasMaxLength(64).IsFixedLength();
+            token.Property(t => t.ReplacedByHash).HasMaxLength(64).IsFixedLength();
+            token.Property(t => t.Method).HasMaxLength(RefreshToken.MethodMaxLength).IsRequired();
+            token.HasOne<User>().WithMany().HasForeignKey(t => t.UserId).OnDelete(DeleteBehavior.Cascade);
+            // Reuse revokes a family; the cleanup deletes expired tokens.
+            token.HasIndex(t => t.FamilyId);
+            token.HasIndex(t => t.ExpiresAt);
+        });
+
+        modelBuilder.Entity<Deadline>(deadline =>
+        {
+            deadline.ToTable("deadlines");
+            deadline.HasKey(d => d.Id);
+            deadline.Property(d => d.Id).ValueGeneratedNever();
+            deadline.Property(d => d.Title).HasMaxLength(Deadline.TitleMaxLength).IsRequired();
+            deadline.Property(d => d.Course).HasMaxLength(Deadline.CourseMaxLength);
+            deadline.Property(d => d.Notes).HasMaxLength(Deadline.NotesMaxLength);
+            deadline.HasOne<User>().WithMany().HasForeignKey(d => d.UserId).OnDelete(DeleteBehavior.Cascade);
+            deadline.HasIndex(d => new { d.UserId, d.DueAt });
+        });
     }
 
     /// <summary>Class reminders (CampusPulse-ro/api#53): the student's lead, and the reminders already sent

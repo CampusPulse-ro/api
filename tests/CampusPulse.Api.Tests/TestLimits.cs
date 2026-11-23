@@ -13,11 +13,14 @@ public static class TestLimits
 {
     public static void Configure(IWebHostBuilder builder)
     {
-        foreach (var bucket in new[] { "SignedIn", "Anonymous", "Writes", "Account" })
+        foreach (var bucket in new[] { "SignedIn", "Anonymous", "Writes", "Auth", "Account" })
         {
             builder.UseSetting($"RateLimits:{bucket}:Burst", "10000");
             builder.UseSetting($"RateLimits:{bucket}:PerMinute", "10000");
         }
+
+        builder.UseSetting("RateLimits:EmailStart:Limit", "10000");
+        builder.UseSetting("RateLimits:EmailStart:WindowMinutes", "60");
 
         builder.UseSetting("TimetableCache:VersionCheckSeconds", "0");
     }

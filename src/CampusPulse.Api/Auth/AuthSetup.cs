@@ -1,13 +1,91 @@
 using System.Security.Claims;
+using System.Security.Cryptography;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Tokens;
 
 namespace CampusPulse.Api.Auth;
 
+/// <summary>What sign-in is configured: UPT Entra (<see cref="Entra"/>, null when unset) and our own tokens.</summary>
+public sealed record AuthConfiguration(AuthSettings? Entra, bool OwnTokens, bool OwnTokensEphemeral);
+
 public static partial class AuthSetup
 {
     public const string LogCategory = "CampusPulse.Api.Auth";
+
+    /// <summary>The default scheme: forwards each request to <see cref="CampusPulseTokens.Scheme"/> when its bearer
+    /// token is one of ours (issuer <c>campuspulse</c>), else to the UPT Entra bearer
+    /// (<see cref="JwtBearerDefaults.AuthenticationScheme"/>), which installed app versions still send.</summary>
+    public const string SelectorScheme = "BearerByIssuer";
+
+    /// <summary>
+    /// Both bearer schemes (see <see cref="SelectorScheme"/>), our token service (<see cref="CampusPulseTokens"/>) and
+    /// the Entra token check for tokens sent in a body (<see cref="EntraTokenValidator"/>). Every endpoint needs a
+    /// signed-in caller unless it is marked <c>AllowAnonymous</c> (the fallback policy).
+    /// </summary>
+    public static AuthConfiguration AddCampusPulseAuth(this WebApplicationBuilder builder)
+    {
+        var entra = builder.Services.AddEntraBearer(builder.Configuration);
+        var key = CampusPulseTokens.KeyFrom(builder.Configuration, builder.Environment, out var ephemeral);
+        builder.Services.AddSingleton(provider => new CampusPulseTokens(key, provider.GetRequiredService<TimeProvider>()));
+        builder.Services.AddSingleton<EntraTokenValidator>();
+        builder.Services.AddAuthentication(SelectorScheme)
+            .AddPolicyScheme(SelectorScheme, null, options => options.ForwardDefaultSelector = SchemeOf)
+            .AddJwtBearer(CampusPulseTokens.Scheme, options =>
+            {
+                options.MapInboundClaims = false;
+                // Without a key nothing validates: a random one nobody signs with.
+                options.TokenValidationParameters = CampusPulseTokens.ValidationParameters(
+                    key ?? new SymmetricSecurityKey(RandomNumberGenerator.GetBytes(CampusPulseTokens.MinimumKeyBytes)));
+                options.Events = new JwtBearerEvents
+                {
+                    OnTokenValidated = context =>
+                    {
+                        if (CampusPulseTokens.UserIdOf(context.Principal!) is null)
+                        {
+                            LogRefused(Logger(context.HttpContext), "no account id (sub)");
+                            context.Fail("The token was refused: no account id.");
+                        }
+
+                        return Task.CompletedTask;
+                    },
+                    OnAuthenticationFailed = context =>
+                    {
+                        LogRefused(Logger(context.HttpContext), context.Exception.GetType().Name);
+                        return Task.CompletedTask;
+                    },
+                };
+            });
+        var configuration = new AuthConfiguration(entra, key is not null, ephemeral);
+        builder.Services.AddSingleton(configuration);
+        return configuration;
+    }
+
+    /// <summary>Our token (issuer <c>campuspulse</c>) or not: read without checking anything, only to pick the scheme
+    /// that then checks it.</summary>
+    private static string SchemeOf(HttpContext context)
+    {
+        var header = context.Request.Headers.Authorization.ToString();
+        if (header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+        {
+            var token = header["Bearer ".Length..].Trim();
+            var handler = new JsonWebTokenHandler();
+            try
+            {
+                if (handler.CanReadToken(token) && handler.ReadJsonWebToken(token).Issuer == CampusPulseTokens.Issuer)
+                {
+                    return CampusPulseTokens.Scheme;
+                }
+            }
+            catch (Exception e) when (e is ArgumentException or SecurityTokenException)
+            {
+                // Not a readable JWT: the Entra scheme refuses it like any other bad token.
+            }
+        }
+
+        return JwtBearerDefaults.AuthenticationScheme;
+    }
 
     /// <summary>
     /// JWT bearer tokens from UPT's tenant. A token must: be signed with RS256 by Microsoft (keys from
@@ -21,12 +99,12 @@ public static partial class AuthSetup
     /// Unconfigured (no settings): fails closed. Requests without a token stay anonymous (so
     /// /health works), and any token is refused, so an endpoint that needs sign-in is always 401.
     /// </summary>
-    public static AuthSettings? AddCampusPulseAuth(this IServiceCollection services, IConfiguration configuration)
+    private static AuthSettings? AddEntraBearer(this IServiceCollection services, IConfiguration configuration)
     {
         var settings = AuthSettings.FromConfiguration(configuration);
 
-        services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-            .AddJwtBearer(options =>
+        services.AddAuthentication()
+            .AddJwtBearer(JwtBearerDefaults.AuthenticationScheme, options =>
             {
                 // Keep the claims as Microsoft names them (scp, oid, tid), not mapped to long URIs.
                 options.MapInboundClaims = false;
@@ -98,7 +176,7 @@ public static partial class AuthSetup
 
     /// <summary>Why a token that passed the signature, issuer, audience and lifetime checks is still
     /// refused, or null to accept it. Reasons are fixed texts: nothing from the token is echoed.</summary>
-    private static string? Refusal(ClaimsPrincipal principal, AuthSettings settings)
+    internal static string? Refusal(ClaimsPrincipal principal, AuthSettings settings)
     {
         if (principal.FindFirst("tid")?.Value != settings.TenantId)
         {
