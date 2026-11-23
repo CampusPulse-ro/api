@@ -161,7 +161,9 @@ public static class SignIn
     /// <see cref="RefreshToken.RetryWindow"/> ago and its replacement is unused (<see cref="RefreshToken.MayRetry"/>): the
     /// client never got that answer, or sent two refreshes at once, and gets new tokens again. The account's row and then
     /// the token's are locked, in the order <c>DELETE /me</c> locks them (so the two can't deadlock), and two refreshes of
-    /// one token run one after the other.</summary>
+    /// one token run one after the other. A retry gets the replacement the first refresh made (it is derived from the
+    /// presented token, <see cref="CampusPulseTokens.NextRefreshToken"/>), so a family never has two live tokens and every
+    /// answer the client may keep holds the live one.</summary>
     public static async Task<(RefreshResult Result, TokenResponse? Response)> RefreshAsync(CampusPulseDbContext db, CampusPulseTokens tokens,
         string presented, DateTimeOffset now, CancellationToken cancellationToken)
     {
@@ -183,23 +185,32 @@ public static class SignIn
             return (RefreshResult.Invalid, null);
         }
 
+        var refreshToken = tokens.NextRefreshToken(presented);
+        RefreshToken next;
         if (row.ReplacedByHash is not null)
         {
+            // A retry gets the same replacement again, as long as it is the one derived from this token (a token rotated
+            // before replacements were derived, or under another signing key, isn't) and still unused.
             var replacement = await db.RefreshTokens.SingleOrDefaultAsync(t => t.TokenHash == row.ReplacedByHash, cancellationToken);
-            if (!row.MayRetry(replacement, now))
+            if (!row.MayRetry(replacement, now) || replacement!.TokenHash != RefreshToken.HashOf(refreshToken))
             {
                 await RevokeFamilyAsync(db, row.FamilyId, now, cancellationToken);
                 await transaction.CommitAsync(cancellationToken);
                 return (RefreshResult.Reused, null);
             }
+
+            next = replacement;
         }
         else if (!row.Usable(now))
         {
             return (RefreshResult.Invalid, null);
         }
+        else
+        {
+            next = row.Rotate(refreshToken, now);
+            db.RefreshTokens.Add(next);
+        }
 
-        var (next, refreshToken) = row.Rotate(now);
-        db.RefreshTokens.Add(next);
         user.Seen(null, now);
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
@@ -223,6 +234,10 @@ public static class SignIn
         db.RefreshTokens.Where(t => t.FamilyId == familyId && t.RevokedAt == null)
             .ExecuteUpdateAsync(set => set.SetProperty(t => t.RevokedAt, now), cancellationToken);
 
-    internal static bool IsUniqueViolation(DbUpdateException e) =>
-        e.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation };
+    internal static bool IsUniqueViolation(DbUpdateException e) => UniqueViolation(e) is not null;
+
+    /// <summary>The unique constraint or index <paramref name="e"/> broke, or null when it isn't a unique
+    /// violation.</summary>
+    internal static string? UniqueViolation(DbUpdateException e) =>
+        e.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation } p ? p.ConstraintName ?? "" : null;
 }

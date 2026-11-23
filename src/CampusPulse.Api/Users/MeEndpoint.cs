@@ -153,8 +153,7 @@ public static partial class MeEndpoint
         ClaimsPrincipal principal, CampusPulseDbContext db, EntraTokenValidator entra, TimeProvider time, ILoggerFactory loggers,
         CancellationToken cancellationToken)
     {
-        var user = await Caller.Users(db, principal).FirstOrDefaultAsync(cancellationToken);
-        if (user is null)
+        if (!await Caller.Users(db, principal).AnyAsync(cancellationToken))
         {
             return NoAccount();
         }
@@ -167,45 +166,60 @@ public static partial class MeEndpoint
 
         var upt = UptClaims.From(token!);
         var now = time.GetUtcNow();
-        var owner = await db.UserIdentities.Where(i => i.Provider == UserIdentity.UptMicrosoft && i.Subject == upt.Oid)
-            .Select(i => (Guid?)i.UserId).SingleOrDefaultAsync(cancellationToken)
-            ?? await db.Users.Where(u => u.EntraObjectId == upt.Oid).Select(u => (Guid?)u.Id).FirstOrDefaultAsync(cancellationToken);
-        if (owner == user.Id && await db.UserIdentities.AnyAsync(i => i.UserId == user.Id && i.Subject == upt.Oid, cancellationToken))
+        // A unique key refuses the link when a request at the same moment got there first: the state is read again and
+        // the checks below answer (this same link, made by a double tap, is a 200). Another account taking the address
+        // means linking again without it. Should the clash persist, the key it hit says which conflict it is.
+        var withEmail = true;
+        for (var attempt = 1; ; attempt++)
         {
-            return TypedResults.Ok(await MeResponse.OfAsync(db, user, cancellationToken));
-        }
+            var user = await Caller.Users(db, principal).FirstOrDefaultAsync(cancellationToken);
+            if (user is null)
+            {
+                return NoAccount();
+            }
 
-        if (owner is not null && owner != user.Id)
-        {
-            return IdentityInUse();
-        }
+            var owner = await db.UserIdentities.Where(i => i.Provider == UserIdentity.UptMicrosoft && i.Subject == upt.Oid)
+                .Select(i => (Guid?)i.UserId).SingleOrDefaultAsync(cancellationToken)
+                ?? await db.Users.Where(u => u.EntraObjectId == upt.Oid).Select(u => (Guid?)u.Id).FirstOrDefaultAsync(cancellationToken);
+            if (owner == user.Id && await db.UserIdentities.AnyAsync(i => i.UserId == user.Id && i.Subject == upt.Oid, cancellationToken))
+            {
+                return TypedResults.Ok(await MeResponse.OfAsync(db, user, cancellationToken));
+            }
 
-        if (await db.UserIdentities.AnyAsync(i => i.UserId == user.Id && i.Provider == UserIdentity.UptMicrosoft, cancellationToken))
-        {
-            return Problems.Of(StatusCodes.Status409Conflict, "already-linked", "Another UPT account is linked",
-                "This account already has a UPT account. Unlink it first.");
-        }
+            if (owner is not null && owner != user.Id)
+            {
+                return IdentityInUse();
+            }
 
-        user.LinkUpt(upt.Oid);
-        user.Seen(upt.Name, now);
-        if (user.Email is null && upt.VerifiedEmail is { } email && !await db.Users.AnyAsync(u => u.Email == email, cancellationToken))
-        {
-            user.VerifyEmail(email);
-        }
+            if (await db.UserIdentities.AnyAsync(i => i.UserId == user.Id && i.Provider == UserIdentity.UptMicrosoft, cancellationToken))
+            {
+                return AlreadyLinked();
+            }
 
-        db.UserIdentities.Add(new UserIdentity(user.Id, UserIdentity.UptMicrosoft, upt.Oid, upt.Email, now));
-        try
-        {
-            await db.SaveChangesAsync(cancellationToken);
-        }
-        catch (DbUpdateException e) when (SignIn.IsUniqueViolation(e))
-        {
-            // Linked to another account, or given this address, by a request at the same moment.
-            return IdentityInUse();
-        }
+            user.LinkUpt(upt.Oid);
+            user.Seen(upt.Name, now);
+            if (withEmail && user.Email is null && upt.VerifiedEmail is { } email && !await db.Users.AnyAsync(u => u.Email == email, cancellationToken))
+            {
+                user.VerifyEmail(email);
+            }
 
-        LogUptLinked(loggers.CreateLogger(LogCategory));
-        return TypedResults.Ok(await MeResponse.OfAsync(db, user, cancellationToken));
+            db.UserIdentities.Add(new UserIdentity(user.Id, UserIdentity.UptMicrosoft, upt.Oid, upt.Email, now));
+            try
+            {
+                await db.SaveChangesAsync(cancellationToken);
+                LogUptLinked(loggers.CreateLogger(LogCategory));
+                return TypedResults.Ok(await MeResponse.OfAsync(db, user, cancellationToken));
+            }
+            catch (DbUpdateException e) when (SignIn.UniqueViolation(e) is { } key)
+            {
+                db.ChangeTracker.Clear();
+                withEmail &= key != EmailKey;
+                if (attempt == 3)
+                {
+                    return key == OneUptPerAccountKey ? AlreadyLinked() : IdentityInUse();
+                }
+            }
+        }
     }
 
     /// <summary>Unlinks the account's UPT Microsoft account: 204, also when none was linked. 409
@@ -275,6 +289,13 @@ public static partial class MeEndpoint
         statusCode: StatusCodes.Status404NotFound,
         title: "No account",
         detail: "This sign-in has no CampusPulse account: it was deleted or never created. Sign out; signing in again creates a new one.");
+
+    /// <summary>The unique index on the account email, and the one that allows one UPT account per account.</summary>
+    private const string EmailKey = "ix_users_verified_email";
+    private const string OneUptPerAccountKey = "ix_user_identities_user_id_provider";
+
+    private static ProblemHttpResult AlreadyLinked() => Problems.Of(StatusCodes.Status409Conflict, "already-linked",
+        "Another UPT account is linked", "This account already has a UPT account. Unlink it first.");
 
     private static ProblemHttpResult IdentityInUse() => Problems.Of(StatusCodes.Status409Conflict, "identity-in-use",
         "UPT account in use", "This UPT account belongs to another CampusPulse account. Sign in with it there, or unlink it there first.");

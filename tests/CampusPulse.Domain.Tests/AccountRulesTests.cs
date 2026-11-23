@@ -145,12 +145,12 @@ public sealed class RefreshTokenTests
     {
         var (row, _) = RefreshToken.Start(Guid.NewGuid(), "upt-microsoft", T0);
 
-        var (next, nextToken) = row.Rotate(T0.AddDays(1));
+        var next = row.Rotate("next-token", T0.AddDays(1));
 
         Assert.False(row.Usable(T0.AddDays(1)));
         Assert.Equal(next.TokenHash, row.ReplacedByHash);
         Assert.Equal((row.FamilyId, row.UserId, "upt-microsoft"), (next.FamilyId, next.UserId, next.Method));
-        Assert.Equal(RefreshToken.HashOf(nextToken), next.TokenHash);
+        Assert.Equal(RefreshToken.HashOf("next-token"), next.TokenHash);
         Assert.Equal(T0.AddDays(61), next.ExpiresAt);
     }
 
@@ -158,19 +158,16 @@ public sealed class RefreshTokenTests
     public void A_replaced_token_may_be_retried_for_a_minute_while_its_replacement_is_unused()
     {
         var (row, _) = RefreshToken.Start(Guid.NewGuid(), "email", T0);
-        var (next, _) = row.Rotate(T0.AddDays(1));
+        var next = row.Rotate("next-token", T0.AddDays(1));
+        var other = RefreshToken.Start(row.UserId, "email", T0).Row;
 
         Assert.True(row.MayRetry(next, T0.AddDays(1).AddSeconds(59)));
-        Assert.False(row.MayRetry(next, T0.AddDays(1).AddMinutes(1).AddSeconds(1)));
+        Assert.False(row.MayRetry(next, T0.AddDays(1).AddMinutes(1)));     // the window is open-ended at a minute
         Assert.False(row.MayRetry(null, T0.AddDays(1)));
-        var (again, _) = row.Rotate(T0.AddDays(1).AddSeconds(30));
-        Assert.Equal(again.TokenHash, row.ReplacedByHash);
-        Assert.False(row.MayRetry(next, T0.AddDays(1).AddSeconds(40)));   // not its replacement any more
-        Assert.True(row.MayRetry(again, T0.AddDays(1).AddSeconds(40)));
-        Assert.False(row.MayRetry(again, T0.AddDays(1).AddSeconds(61)));  // the window counts from the first replacement
+        Assert.False(row.MayRetry(other, T0.AddDays(1)));                   // not its replacement
 
-        again.Rotate(T0.AddDays(1).AddSeconds(45));                       // the replacement was used
-        Assert.False(row.MayRetry(again, T0.AddDays(1).AddSeconds(50)));
+        next.Rotate("after-next", T0.AddDays(1).AddSeconds(45));            // the replacement was used
+        Assert.False(row.MayRetry(next, T0.AddDays(1).AddSeconds(50)));
     }
 }
 
@@ -193,14 +190,20 @@ public sealed class DeadlineTests
     [InlineData("   ", null, null)]
     [InlineData(null, null, null)]
     public void A_title_is_required(string? title, string? course, string? notes) =>
-        Assert.NotNull(Deadline.Problem(title, course, notes));
+        Assert.NotNull(Deadline.Problem(title, course, notes, T0));
 
     [Fact]
     public void Limits_are_200_200_and_2000()
     {
-        Assert.Null(Deadline.Problem(new string('t', 200), new string('c', 200), new string('n', 2000)));
-        Assert.NotNull(Deadline.Problem(new string('t', 201), null, null));
-        Assert.NotNull(Deadline.Problem("t", new string('c', 201), null));
-        Assert.NotNull(Deadline.Problem("t", null, new string('n', 2001)));
+        Assert.Null(Deadline.Problem(new string('t', 200), new string('c', 200), new string('n', 2000), T0));
+        Assert.NotNull(Deadline.Problem(new string('t', 201), null, null, T0));
+        Assert.NotNull(Deadline.Problem("t", new string('c', 201), null, T0));
+        Assert.NotNull(Deadline.Problem("t", null, new string('n', 2001), T0));
+        Assert.Null(Deadline.Problem("t", null, null, Deadline.EarliestDue));
+        Assert.NotNull(Deadline.Problem("t", null, null, default(DateTimeOffset)));
+        Assert.Null(Deadline.Problem("t", null, null, null));                 // a kept due time isn't checked again
+        Assert.NotNull(Deadline.Problem("t", null, null, Deadline.EarliestDue.AddTicks(-1)));
+        Assert.NotNull(Deadline.Problem("t", null, null, Deadline.LatestDue));
+        Assert.Throws<ArgumentException>(() => new Deadline(Guid.NewGuid(), "t", null, default, null, T0));
     }
 }

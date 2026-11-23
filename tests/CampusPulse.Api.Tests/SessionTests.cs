@@ -63,9 +63,10 @@ public sealed class SessionTests(PostgresAppFactory factory) : IClassFixture<Pos
     }
 
     /// <summary>A refresh whose answer got lost can be sent again for a minute, as long as the token that answer held
-    /// is unused; once its successor is used, the old token is a copy again.</summary>
+    /// is unused: it gets that same token again, so the family keeps one live token. Once that token is used, the old
+    /// one is a copy again.</summary>
     [PostgresFact]
-    public async Task A_lost_refresh_answer_can_be_retried_for_a_minute()
+    public async Task A_lost_refresh_answer_can_be_retried_for_a_minute_and_gets_the_same_token()
     {
         using var app = new AccountsApp(factory);
         var first = await app.SignInByEmail(AccountsApp.NewEmail());
@@ -73,9 +74,15 @@ public sealed class SessionTests(PostgresAppFactory factory) : IClassFixture<Pos
         app.Clock.Advance(TimeSpan.FromSeconds(30));
 
         var retried = await AccountsApp.Tokens(await app.Post("/auth/refresh", new { refreshToken = first.RefreshToken }));
-        var next = await AccountsApp.Tokens(await app.Post("/auth/refresh", new { refreshToken = retried.RefreshToken }));
 
-        Assert.NotEqual(lost.RefreshToken, retried.RefreshToken);
+        Assert.Equal(lost.RefreshToken, retried.RefreshToken);
+        await using (var db = factory.CreateDbContext())
+        {
+            var live = Assert.Single(await db.RefreshTokens.Where(t => t.UserId == first.User.Id && t.RevokedAt == null).ToListAsync());
+            Assert.Equal(RefreshToken.HashOf(retried.RefreshToken), live.TokenHash);
+        }
+
+        var next = await AccountsApp.Tokens(await app.Post("/auth/refresh", new { refreshToken = retried.RefreshToken }));
         Assert.Equal(first.User.Id, next.User.Id);
         Assert.Equal((HttpStatusCode.Unauthorized, "refresh-invalid"),
             await AccountsApp.Problem(await app.Post("/auth/refresh", new { refreshToken = first.RefreshToken })));
@@ -83,8 +90,30 @@ public sealed class SessionTests(PostgresAppFactory factory) : IClassFixture<Pos
             await AccountsApp.Problem(await app.Post("/auth/refresh", new { refreshToken = next.RefreshToken })));
     }
 
+    /// <summary>After the minute, showing the original token again is a reuse that ends the session, its live token
+    /// (the one the retries got) included.</summary>
     [PostgresFact]
-    public async Task Two_refreshes_of_one_token_at_once_both_get_tokens()
+    public async Task After_the_minute_a_retried_token_is_a_reuse_that_ends_the_session()
+    {
+        using var app = new AccountsApp(factory);
+        var first = await app.SignInByEmail(AccountsApp.NewEmail());
+        await app.Post("/auth/refresh", new { refreshToken = first.RefreshToken });
+        app.Clock.Advance(TimeSpan.FromSeconds(30));
+        var retried = await AccountsApp.Tokens(await app.Post("/auth/refresh", new { refreshToken = first.RefreshToken }));
+        app.Clock.Advance(RefreshToken.RetryWindow);
+
+        var reuse = await app.Post("/auth/refresh", new { refreshToken = first.RefreshToken });
+        var live = await app.Post("/auth/refresh", new { refreshToken = retried.RefreshToken });
+
+        Assert.Equal((HttpStatusCode.Unauthorized, "refresh-invalid"), await AccountsApp.Problem(reuse));
+        Assert.Equal((HttpStatusCode.Unauthorized, "refresh-invalid"), await AccountsApp.Problem(live));
+    }
+
+    /// <summary>Two refreshes of one token at once (a client that timed out and retried while the first was still
+    /// running) both answer with the same refresh token, whichever finishes first: the client keeps a live token either
+    /// way.</summary>
+    [PostgresFact]
+    public async Task Two_refreshes_of_one_token_at_once_get_the_same_refresh_token()
     {
         using var app = new AccountsApp(factory);
         var first = await app.SignInByEmail(AccountsApp.NewEmail());
@@ -93,8 +122,14 @@ public sealed class SessionTests(PostgresAppFactory factory) : IClassFixture<Pos
 
         Assert.All(answers, answer => Assert.Equal(HttpStatusCode.OK, answer.StatusCode));
         var tokens = await Task.WhenAll(answers.Select(AccountsApp.Tokens));
-        Assert.NotEqual(tokens[0].RefreshToken, tokens[1].RefreshToken);
-        Assert.Equal(HttpStatusCode.OK, (await app.Post("/auth/refresh", new { refreshToken = tokens[1].RefreshToken })).StatusCode);
+        Assert.Equal(tokens[0].RefreshToken, tokens[1].RefreshToken);
+        await using (var db = factory.CreateDbContext())
+        {
+            Assert.Single(await db.RefreshTokens.Where(t => t.UserId == first.User.Id && t.RevokedAt == null).ToListAsync());
+        }
+
+        app.Clock.Advance(TimeSpan.FromMinutes(15));
+        Assert.Equal(HttpStatusCode.OK, (await app.Post("/auth/refresh", new { refreshToken = tokens[0].RefreshToken })).StatusCode);
     }
 
     [PostgresFact]

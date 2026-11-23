@@ -69,7 +69,10 @@ Anything else is 401, logged at Warning with the reason (never the token).
 
 ### Endpoints
 
-All JSON; errors are ProblemDetails whose **`type`** is stable and says which (the title and detail are for people).
+All JSON; errors are ProblemDetails whose **`type`** is stable and says which (the title and detail are for people). On
+every endpoint, a request that doesn't match the contract (a body that is missing, isn't JSON or lacks a required field,
+a query parameter of the wrong type) is **400** `invalid-request`, and a body over the size limit **413**
+`body-too-large`. A malformed id in the path (`/me/deadlines/abc`) matches no route: 404.
 
 | Method + path | Auth | Request → answer |
 |---|---|---|
@@ -81,11 +84,11 @@ All JSON; errors are ProblemDetails whose **`type`** is stable and says which (t
 | `GET /me` | bearer | → **200** `Me`; **404** when the account is gone |
 | `POST /me` | bearer | installed apps only (Entra token): creates the account (**201**) or returns it (**200**). With our token: **200**, or **404** once deleted |
 | `DELETE /me` | bearer | → **204**, also when there was nothing to delete (see [Data](#data)) |
-| `POST /me/identities/upt-microsoft` | bearer | `{ "accessToken": "<Entra token>" }` → **200** `Me`. **409** `identity-in-use` (that UPT account belongs to another CampusPulse account; accounts aren't merged), **409** `already-linked` (this account has another UPT account), **401** `microsoft-token-invalid` |
+| `POST /me/identities/upt-microsoft` | bearer | `{ "accessToken": "<Entra token>" }` → **200** `Me`. **409** `identity-in-use` (that UPT account belongs to another CampusPulse account; accounts aren't merged), **409** `already-linked` (this account has another UPT account), **401** `microsoft-token-invalid`. When another account takes the UPT address at the same moment, UPT is linked without it |
 | `DELETE /me/identities/upt-microsoft` | bearer | → **204**, also when none is linked. **409** `last-sign-in-method` when the account has no verified email |
 | `GET /me/deadlines?from=&to=` | bearer | → **200** `[Deadline]` by `dueAt`; `from`/`to` optional instants, both included |
-| `POST /me/deadlines` | bearer | `{ "title": "Lab 3 report", "course": "MSA", "dueAt": "2026-11-30T21:59:00Z", "notes": "PDF" }` (`course`, `notes` optional) → **201** `Deadline`. **400** `invalid-deadline` (title 1-200, course ≤ 200, notes ≤ 2000), **409** `deadline-limit` (500 per student) |
-| `PATCH /me/deadlines/{id}` | bearer | any of `{ "title", "course", "dueAt", "notes", "done" }`; missing or null = unchanged, `""` clears `course`/`notes` → **200** `Deadline`; **404** for an id that isn't the student's |
+| `POST /me/deadlines` | bearer | `{ "title": "Lab 3 report", "course": "MSA", "dueAt": "2026-11-30T21:59:00Z", "notes": "PDF" }` (`course`, `notes` optional; `title`, `dueAt` required) → **201** `Deadline`. **400** `invalid-deadline` (title 1-200, course ≤ 200, notes ≤ 2000, `dueAt` from 2000 to before 2100), **400** `invalid-request` without `dueAt`, **409** `deadline-limit` (500 per student) |
+| `PATCH /me/deadlines/{id}` | bearer | any of `{ "title", "course", "dueAt", "notes", "done" }`; a missing field is unchanged; `title`, `dueAt` and `done` can't be null (**400** `invalid-deadline` / `invalid-request`); a null `course`/`notes` is unchanged and `""` clears it → **200** `Deadline`; **404** for an id that isn't the student's |
 | `DELETE /me/deadlines/{id}` | bearer | → **204** |
 
 ```jsonc
@@ -121,7 +124,9 @@ All JSON; errors are ProblemDetails whose **`type`** is stable and says which (t
 - **Refresh tokens:** 256 random bits (base64url), stored as their SHA-256, **60 days** from each refresh, replaced on
   every refresh. One sign-in on one device is one *family*; a token that was already replaced, shown again, means it was
   copied, and revokes the family. Except for **one minute** after its replacement while the replacement is unused: then
-  the client never got that answer (a dropped connection) or sent two refreshes at once, and it gets new tokens again.
+  the client never got that answer (a dropped connection) or sent two refreshes at once, and the retry gets **the same
+  refresh token** that answer held (a token's replacement is an HMAC of it under a key derived from `Auth__SigningKey`)
+  with a new access token. So a family never has two live tokens, and every answer a client may keep holds the live one.
   Clients still refresh one request at a time: a retry after that minute, or after the new token was used, signs the
   device out.
 - Logged as counts only (`Email sign-in code sent`, `Signed in with UPT (new account: True)`, `A refresh token was used
@@ -445,11 +450,12 @@ Sign-in codes are the only email the API sends (`IEmailSender`, chosen at startu
 
 The email is plain text with a minimal HTML copy, in English or Romanian (`language` in the request): the subject
 carries the code ("Your CampusPulse code: 123456", "Codul tău CampusPulse: 123456") so it shows in a notification, and
-there are **no links** in it, so a phished copy has nothing to click. When Resend refuses or can't be reached the
-request answers 503 `email-unavailable` and the new code is withdrawn: it doesn't count against the address's limit and
-can't be used, and the code it replaced (an earlier email's, still within its 10 minutes) works again. The send isn't
-tied to the request, so a client that disconnects can't leave a code issued and counted behind. Logged: `Resend refused an email: HTTP 422` or `Resend couldn't be reached: <exception type>`, never
-the address, the code or Resend's answer (which may quote them).
+there are **no links** in it, so a phished copy has nothing to click. When Resend refuses or can't be reached, or the
+sender fails in any other way, the request answers 503 `email-unavailable` and the new code is withdrawn: it doesn't
+count against the address's limit and can't be used, and the code it replaced (an earlier email's, still within its 10
+minutes) works again. The send isn't tied to the request, so a client that disconnects can't leave a code issued and
+counted behind. Logged: `Resend refused an email: HTTP 422`, `Resend couldn't be reached: <exception type>` or `The
+email sender failed: <exception type>`, never the address, the code or Resend's answer (which may quote them).
 
 ## Timetable
 

@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using CampusPulse.Api.Deadlines;
 using CampusPulse.Domain.Deadlines;
+using Microsoft.EntityFrameworkCore;
 
 namespace CampusPulse.Api.Tests;
 
@@ -59,15 +60,21 @@ public sealed class DeadlineApiTests(PostgresAppFactory factory) : IClassFixture
         Assert.Equal(["in 1", "in 2"], (await List(app, token, $"?to={from}")).Select(d => d.Title));
     }
 
+    /// <summary>Values out of bounds are <c>invalid-deadline</c>; a body that doesn't match the contract (no
+    /// <c>dueAt</c>, a null one, not a date) is <c>invalid-request</c>. Nothing is stored either way.</summary>
     [PostgresTheory]
-    [InlineData("""{ "title": "", "dueAt": "2026-11-30T21:59:00Z" }""")]
-    [InlineData("""{ "title": "   ", "dueAt": "2026-11-30T21:59:00Z" }""")]
-    [InlineData("""{ "title": "x", "dueAt": "2026-11-30T21:59:00Z", "course": "{201}" }""")]
-    [InlineData("""{ "title": "x", "dueAt": "2026-11-30T21:59:00Z", "notes": "{2001}" }""")]
-    [InlineData("""{ "title": "{201}", "dueAt": "2026-11-30T21:59:00Z" }""")]
-    [InlineData("""{ "title": "x" }""")]
-    [InlineData("""{ "title": "x", "dueAt": "tomorrow" }""")]
-    public async Task A_deadline_out_of_bounds_is_400(string template)
+    [InlineData("""{ "title": "", "dueAt": "2026-11-30T21:59:00Z" }""", "invalid-deadline")]
+    [InlineData("""{ "title": "   ", "dueAt": "2026-11-30T21:59:00Z" }""", "invalid-deadline")]
+    [InlineData("""{ "title": "x", "dueAt": "2026-11-30T21:59:00Z", "course": "{201}" }""", "invalid-deadline")]
+    [InlineData("""{ "title": "x", "dueAt": "2026-11-30T21:59:00Z", "notes": "{2001}" }""", "invalid-deadline")]
+    [InlineData("""{ "title": "{201}", "dueAt": "2026-11-30T21:59:00Z" }""", "invalid-deadline")]
+    [InlineData("""{ "title": "x", "dueAt": "0001-01-01T00:00:00Z" }""", "invalid-deadline")]
+    [InlineData("""{ "title": "x", "dueAt": "2100-01-01T00:00:00Z" }""", "invalid-deadline")]
+    [InlineData("""{ "title": "x" }""", "invalid-request")]
+    [InlineData("""{ "title": "x", "dueAt": null }""", "invalid-request")]
+    [InlineData("""{ "title": "x", "dueAt": "tomorrow" }""", "invalid-request")]
+    [InlineData("""{ "dueAt": "2026-11-30T21:59:00Z" }""", "invalid-request")]
+    public async Task A_deadline_out_of_bounds_is_400(string template, string type)
     {
         using var app = new AccountsApp(factory);
         var token = (await app.SignInByEmail(AccountsApp.NewEmail())).AccessToken;
@@ -77,8 +84,65 @@ public sealed class DeadlineApiTests(PostgresAppFactory factory) : IClassFixture
         request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
         var response = await app.Client.SendAsync(request);
 
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal((HttpStatusCode.BadRequest, type), await AccountsApp.Problem(response));
         Assert.Empty(await List(app, token));
+    }
+
+    /// <summary>A PATCH may leave a field out, but can't set <c>title</c>, <c>dueAt</c> or <c>done</c> to null, nor move
+    /// the due time out of bounds.</summary>
+    [PostgresTheory]
+    [InlineData("""{ "title": null }""", "invalid-deadline")]
+    [InlineData("""{ "dueAt": null }""", "invalid-request")]
+    [InlineData("""{ "done": null }""", "invalid-request")]
+    [InlineData("""{ "dueAt": "0001-01-01T00:00:00Z" }""", "invalid-deadline")]
+    public async Task An_edit_cant_null_a_required_field(string json, string type)
+    {
+        using var app = new AccountsApp(factory);
+        var token = (await app.SignInByEmail(AccountsApp.NewEmail())).AccessToken;
+        var deadline = await Read(await app.Post("/me/deadlines", new { title = "Lab", dueAt = Monday }, token));
+
+        var request = new HttpRequestMessage(HttpMethod.Patch, $"/me/deadlines/{deadline.Id}")
+        {
+            Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json"),
+        };
+        request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+        var response = await app.Client.SendAsync(request);
+
+        Assert.Equal((HttpStatusCode.BadRequest, type), await AccountsApp.Problem(response));
+        Assert.Equal(deadline, Assert.Single(await List(app, token)));
+    }
+
+    /// <summary>A deadline stored before due times were bounded stays editable: only a due time the body sends is
+    /// checked.</summary>
+    [PostgresFact]
+    public async Task A_deadline_stored_out_of_bounds_can_still_be_ticked_off()
+    {
+        using var app = new AccountsApp(factory);
+        var account = await app.SignInByEmail(AccountsApp.NewEmail());
+        var deadline = await Read(await app.Post("/me/deadlines", new { title = "Lab", dueAt = Monday }, account.AccessToken));
+        await using (var db = factory.CreateDbContext())
+        {
+            var far = new DateTimeOffset(2150, 1, 1, 0, 0, 0, TimeSpan.Zero);
+            await db.Deadlines.Where(d => d.Id == deadline.Id).ExecuteUpdateAsync(set => set.SetProperty(d => d.DueAt, far));
+        }
+
+        var done = await Read(await app.Send(HttpMethod.Patch, $"/me/deadlines/{deadline.Id}", new { done = true }, account.AccessToken));
+
+        Assert.Equal((true, 2150), (done.Done, done.DueAt.Year));
+    }
+
+    [PostgresFact]
+    public async Task An_edit_with_only_some_fields_keeps_the_others()
+    {
+        using var app = new AccountsApp(factory);
+        var token = (await app.SignInByEmail(AccountsApp.NewEmail())).AccessToken;
+        var deadline = await Read(await app.Post("/me/deadlines", new { title = "Lab", course = "MSA", dueAt = Monday, notes = "PDF" }, token));
+
+        var moved = await Read(await app.Send(HttpMethod.Patch, $"/me/deadlines/{deadline.Id}", new { dueAt = Monday.AddDays(1) }, token));
+        var kept = await Read(await app.Send(HttpMethod.Patch, $"/me/deadlines/{deadline.Id}", new { course = (string?)null }, token));
+
+        Assert.Equal(("Lab", "MSA", "PDF", false, Monday.AddDays(1)), (moved.Title, moved.Course, moved.Notes, moved.Done, moved.DueAt));
+        Assert.Equal(("MSA", false), (kept.Course, kept.Done));
     }
 
     [PostgresFact]

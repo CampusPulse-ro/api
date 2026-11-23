@@ -4,7 +4,8 @@ using CampusPulse.Api.Accounts.Email;
 
 namespace CampusPulse.Api.Tests;
 
-/// <summary>Stands in for Resend: keeps every message, and can be told to fail (<see cref="Refuse"/>).</summary>
+/// <summary>Stands in for Resend: keeps every message, and can be told to fail (<see cref="Refuse"/>) or to throw
+/// (<see cref="Throw"/>).</summary>
 public sealed partial class CapturingEmailSender : IEmailSender
 {
     private readonly ConcurrentQueue<EmailMessage> _sent = new();
@@ -13,6 +14,8 @@ public sealed partial class CapturingEmailSender : IEmailSender
 
     public bool Refuse { get; set; }
 
+    public bool Throw { get; set; }
+
     public IReadOnlyList<EmailMessage> Sent => [.. _sent];
 
     public Task<bool> SendAsync(EmailMessage message, CancellationToken cancellationToken)
@@ -20,6 +23,11 @@ public sealed partial class CapturingEmailSender : IEmailSender
         if (Refuse)
         {
             return Task.FromResult(false);
+        }
+
+        if (Throw)
+        {
+            throw new InvalidOperationException("The email sender broke.");
         }
 
         _sent.Enqueue(message);
