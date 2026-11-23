@@ -125,9 +125,9 @@ so a request can be followed from nginx into the app's logs.
 
 ## Metrics
 
-The API can serve Prometheus metrics on a loopback-only listener of its own (main README, *Metrics*). Not on yet. To
-turn it on, add to the environment's env file and restart the service (no unit change: the API binds
-`127.0.0.1:<port>` itself, next to `ASPNETCORE_URLS`):
+The API serves Prometheus metrics on a loopback-only listener of its own (main README, *Metrics*). **On in both
+environments since v0.3.0**: each env file sets the port, and a restart picks a change up (no unit change: the API
+binds `127.0.0.1:<port>` itself, next to `ASPNETCORE_URLS`):
 
 ```bash
 Metrics__Port=9092   # prod; stage: 9093
