@@ -21,6 +21,22 @@ public sealed class CampusPulseTokens(SymmetricSecurityKey? key, TimeProvider ti
 
     public bool IsConfigured => key is not null;
 
+    /// <summary>The refresh token that replaces <paramref name="presented"/>: an HMAC of it under a key derived from the
+    /// signing key, so it is unguessable without the server's key yet the same every time. A retry of a refresh whose
+    /// answer got lost therefore gets the very token that answer held: one live token per family, whichever answer the
+    /// client ends up keeping.</summary>
+    public string NextRefreshToken(string presented)
+    {
+        if (key is null)
+        {
+            throw new InvalidOperationException("Auth__SigningKey is not set: no refresh token can be issued.");
+        }
+
+        var rotationKey = HMACSHA256.HashData(key.Key, "campuspulse refresh-token rotation v1"u8);
+        var next = HMACSHA256.HashData(rotationKey, System.Text.Encoding.UTF8.GetBytes(presented));
+        return Convert.ToBase64String(next).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    }
+
     /// <summary>A new access token for <paramref name="userId"/>, signed in by <paramref name="method"/>.</summary>
     public (string Token, DateTimeOffset ExpiresAt) Issue(Guid userId, string method)
     {

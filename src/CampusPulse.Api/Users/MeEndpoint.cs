@@ -166,10 +166,11 @@ public static partial class MeEndpoint
 
         var upt = UptClaims.From(token!);
         var now = time.GetUtcNow();
-        // A unique key refuses the link when a request at the same moment got there first. Which key says what happened:
-        // the UPT account went to another account (identity-in-use), this account got another UPT account
-        // (already-linked), or another account took the address (UPT is linked again, without it).
-        for (var withEmail = true; ; withEmail = false)
+        // A unique key refuses the link when a request at the same moment got there first: the state is read again and
+        // the checks below answer (this same link, made by a double tap, is a 200). Another account taking the address
+        // means linking again without it. Should the clash persist, the key it hit says which conflict it is.
+        var withEmail = true;
+        for (var attempt = 1; ; attempt++)
         {
             var user = await Caller.Users(db, principal).FirstOrDefaultAsync(cancellationToken);
             if (user is null)
@@ -212,12 +213,11 @@ public static partial class MeEndpoint
             catch (DbUpdateException e) when (SignIn.UniqueViolation(e) is { } key)
             {
                 db.ChangeTracker.Clear();
-                if (key == EmailKey && withEmail)
+                withEmail &= key != EmailKey;
+                if (attempt == 3)
                 {
-                    continue;
+                    return key == OneUptPerAccountKey ? AlreadyLinked() : IdentityInUse();
                 }
-
-                return key == OneUptPerAccountKey ? AlreadyLinked() : IdentityInUse();
             }
         }
     }

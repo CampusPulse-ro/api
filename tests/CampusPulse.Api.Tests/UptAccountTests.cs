@@ -334,6 +334,22 @@ public sealed class UptAccountTests(PostgresAppFactory factory) : IClassFixture<
         }
     }
 
+    /// <summary>A double tap: the same link twice at once. Both answer 200 with the account linked once.</summary>
+    [PostgresFact]
+    public async Task The_same_link_twice_at_once_answers_200_to_both()
+    {
+        using var app = new AccountsApp(factory);
+        var oid = NewOid();
+        var account = await app.SignInByEmail(AccountsApp.NewEmail());
+
+        var answers = await Task.WhenAll(Enumerable.Range(0, 4).Select(_ =>
+            app.Post("/me/identities/upt-microsoft", new { accessToken = TestAuth.Token(oid: oid) }, account.AccessToken)));
+
+        Assert.All(answers, answer => Assert.Equal(HttpStatusCode.OK, answer.StatusCode));
+        await using var db = factory.CreateDbContext();
+        Assert.Equal(oid, Assert.Single(await db.UserIdentities.Where(i => i.UserId == account.User.Id).ToListAsync()).Subject);
+    }
+
     /// <summary>Another UPT account gets linked to this account while this one is being linked (forced with a trigger):
     /// that is <c>already-linked</c>, not <c>identity-in-use</c>.</summary>
     [PostgresFact]

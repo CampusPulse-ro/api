@@ -71,7 +71,8 @@ Anything else is 401, logged at Warning with the reason (never the token).
 
 All JSON; errors are ProblemDetails whose **`type`** is stable and says which (the title and detail are for people). On
 every endpoint, a request that doesn't match the contract (a body that is missing, isn't JSON or lacks a required field,
-a parameter of the wrong type) is **400** `invalid-request`, and a body over the size limit **413** `body-too-large`.
+a query parameter of the wrong type) is **400** `invalid-request`, and a body over the size limit **413**
+`body-too-large`. A malformed id in the path (`/me/deadlines/abc`) matches no route: 404.
 
 | Method + path | Auth | Request → answer |
 |---|---|---|
@@ -123,9 +124,10 @@ a parameter of the wrong type) is **400** `invalid-request`, and a body over the
 - **Refresh tokens:** 256 random bits (base64url), stored as their SHA-256, **60 days** from each refresh, replaced on
   every refresh. One sign-in on one device is one *family*; a token that was already replaced, shown again, means it was
   copied, and revokes the family. Except for **one minute** after its replacement while the replacement is unused: then
-  the client never got that answer (a dropped connection) or sent two refreshes at once, and it gets new tokens again;
-  the unused replacement is revoked and chained to them, so a family never has two live tokens, and showing that one
-  later is a reuse too. Clients still refresh one request at a time: a retry after that minute, or after the new token was used, signs the
+  the client never got that answer (a dropped connection) or sent two refreshes at once, and the retry gets **the same
+  refresh token** that answer held (a token's replacement is an HMAC of it under a key derived from `Auth__SigningKey`)
+  with a new access token. So a family never has two live tokens, and every answer a client may keep holds the live one.
+  Clients still refresh one request at a time: a retry after that minute, or after the new token was used, signs the
   device out.
 - Logged as counts only (`Email sign-in code sent`, `Signed in with UPT (new account: True)`, `A refresh token was used
   again: its session was revoked`): never a code, a token or an address. An hourly job deletes expired refresh tokens

@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using CampusPulse.Api.Deadlines;
 using CampusPulse.Domain.Deadlines;
+using Microsoft.EntityFrameworkCore;
 
 namespace CampusPulse.Api.Tests;
 
@@ -109,6 +110,25 @@ public sealed class DeadlineApiTests(PostgresAppFactory factory) : IClassFixture
 
         Assert.Equal((HttpStatusCode.BadRequest, type), await AccountsApp.Problem(response));
         Assert.Equal(deadline, Assert.Single(await List(app, token)));
+    }
+
+    /// <summary>A deadline stored before due times were bounded stays editable: only a due time the body sends is
+    /// checked.</summary>
+    [PostgresFact]
+    public async Task A_deadline_stored_out_of_bounds_can_still_be_ticked_off()
+    {
+        using var app = new AccountsApp(factory);
+        var account = await app.SignInByEmail(AccountsApp.NewEmail());
+        var deadline = await Read(await app.Post("/me/deadlines", new { title = "Lab", dueAt = Monday }, account.AccessToken));
+        await using (var db = factory.CreateDbContext())
+        {
+            var far = new DateTimeOffset(2150, 1, 1, 0, 0, 0, TimeSpan.Zero);
+            await db.Deadlines.Where(d => d.Id == deadline.Id).ExecuteUpdateAsync(set => set.SetProperty(d => d.DueAt, far));
+        }
+
+        var done = await Read(await app.Send(HttpMethod.Patch, $"/me/deadlines/{deadline.Id}", new { done = true }, account.AccessToken));
+
+        Assert.Equal((true, 2150), (done.Done, done.DueAt.Year));
     }
 
     [PostgresFact]

@@ -163,7 +163,7 @@ app.UseStatusCodePages(async context =>
             Status = StatusCodes.Status400BadRequest,
             Title = "Bad request",
             Detail = "The request doesn't match the contract (/openapi/v1.json): a body that is missing, isn't JSON or lacks a "
-                + "required field, or a parameter of the wrong type.",
+                + "required field, or a query parameter of the wrong type.",
         },
         StatusCodes.Status413PayloadTooLarge => new Microsoft.AspNetCore.Mvc.ProblemDetails
         {

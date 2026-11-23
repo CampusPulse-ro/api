@@ -118,15 +118,17 @@ public static partial class AuthEndpoints
         // Sent and, when that fails, withdrawn whether or not the client is still waiting: a code issued and counted
         // must not be left behind by a dropped connection. The sender's own timeout bounds it.
         var logger = loggers.CreateLogger(LogCategory);
+        var message = SignInEmail.Compose(email, code, request.Language);
         bool sent;
         try
         {
-            sent = await sender.SendAsync(SignInEmail.Compose(email, code, request.Language), CancellationToken.None);
+            sent = await sender.SendAsync(message, CancellationToken.None);
         }
         catch (Exception e)
         {
-            // Any sender fault is a failed send: the code is withdrawn below rather than left issued behind a 500.
-            LogSenderFailed(logger, e.GetType().Name);
+            // Any sender fault is a failed send: the code is withdrawn below rather than left issued behind a 500. The
+            // exception's message isn't logged (a sender's may quote the address), its type and stack trace are.
+            LogSenderFailed(logger, e.GetType().Name, e.StackTrace);
             sent = false;
         }
 
@@ -306,8 +308,8 @@ public static partial class AuthEndpoints
     [LoggerMessage(EventId = 100, Level = LogLevel.Information, Message = "Email sign-in code sent")]
     private static partial void LogCodeSent(ILogger logger);
 
-    [LoggerMessage(EventId = 108, Level = LogLevel.Error, Message = "The email sender failed: {Reason}")]
-    private static partial void LogSenderFailed(ILogger logger, string reason);
+    [LoggerMessage(EventId = 108, Level = LogLevel.Error, Message = "The email sender failed: {Reason}\n{StackTrace}")]
+    private static partial void LogSenderFailed(ILogger logger, string reason, string? stackTrace);
 
     [LoggerMessage(EventId = 101, Level = LogLevel.Warning, Message = "Email sign-in code not delivered (the code was withdrawn)")]
     private static partial void LogCodeNotDelivered(ILogger logger);

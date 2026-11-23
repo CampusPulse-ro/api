@@ -174,13 +174,12 @@ public static class DeadlineEndpoints
         var title = request.NewTitle ?? deadline.Title;
         var course = request.Course ?? deadline.Course;
         var notes = request.Notes ?? deadline.Notes;
-        var dueAt = request.NewDueAt ?? deadline.DueAt;
-        if (Deadline.Problem(title, course, notes, dueAt) is { } problem)
+        if (Deadline.Problem(title, course, notes, request.NewDueAt) is { } problem)
         {
             return InvalidDeadline(problem);
         }
 
-        deadline.Update(title, course, dueAt, notes, request.NewDone ?? deadline.Done, time.GetUtcNow());
+        deadline.Update(title, course, request.NewDueAt ?? deadline.DueAt, notes, request.NewDone ?? deadline.Done, time.GetUtcNow());
         try
         {
             await db.SaveChangesAsync(cancellationToken);

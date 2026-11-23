@@ -22,6 +22,11 @@ public sealed class Deadline
 
     public Deadline(Guid userId, string title, string? course, DateTimeOffset dueAt, string? notes, DateTimeOffset now)
     {
+        if (Problem(title, course, notes, dueAt) is { } problem)
+        {
+            throw new ArgumentException(problem);
+        }
+
         Id = Guid.CreateVersion7(now);
         UserId = userId;
         CreatedAt = Instants.Stored(now);
@@ -48,17 +53,18 @@ public sealed class Deadline
 
     /// <summary>Why these values can't be a deadline, or null when they can: a title of 1-200 characters, a course of at
     /// most 200 and notes of at most 2000 (trimmed; empty course or notes mean none), due between
-    /// <see cref="EarliestDue"/> and <see cref="LatestDue"/>.</summary>
-    public static string? Problem(string? title, string? course, string? notes, DateTimeOffset dueAt) =>
+    /// <see cref="EarliestDue"/> and <see cref="LatestDue"/> (null: a due time that is kept, which isn't checked again, so
+    /// one stored before the bounds existed stays editable).</summary>
+    public static string? Problem(string? title, string? course, string? notes, DateTimeOffset? dueAt) =>
         (title?.Trim().Length ?? 0) is 0 or > TitleMaxLength ? $"title must be 1-{TitleMaxLength} characters."
         : (course?.Trim().Length ?? 0) > CourseMaxLength ? $"course must be at most {CourseMaxLength} characters."
         : (notes?.Trim().Length ?? 0) > NotesMaxLength ? $"notes must be at most {NotesMaxLength} characters."
-        : dueAt < EarliestDue || dueAt >= LatestDue ? $"dueAt must be from {EarliestDue.Year} up to (not including) {LatestDue.Year}."
+        : dueAt is { } due && (due < EarliestDue || due >= LatestDue) ? $"dueAt must be from {EarliestDue.Year} up to (not including) {LatestDue.Year}."
         : null;
 
     public void Update(string title, string? course, DateTimeOffset dueAt, string? notes, bool done, DateTimeOffset now)
     {
-        if (Problem(title, course, notes, dueAt) is { } problem)
+        if (Problem(title, course, notes, Instants.Stored(dueAt.ToUniversalTime()) == DueAt ? null : dueAt) is { } problem)
         {
             throw new ArgumentException(problem);
         }
