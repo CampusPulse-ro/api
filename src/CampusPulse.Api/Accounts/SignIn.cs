@@ -31,8 +31,8 @@ public static class SignIn
     /// <c>upt-microsoft</c> identity points at; an account the previous release made for it (no identity yet: one is
     /// added); an account whose verified email is the UPT account's, without a UPT account of its own (linked
     /// automatically: both addresses are verified); else a new account, with the UPT email unless another account
-    /// has it. Two first sign-ins at once make one account: the unique keys refuse the second, which then finds the
-    /// first's.
+    /// has it. Only a UPT address counts (<see cref="UptClaims.VerifiedEmail"/>). Two first sign-ins at once make one
+    /// account: the unique keys refuse the second, which then finds the first's.
     /// </summary>
     public static async Task<(User User, bool Created)> UptAsync(CampusPulseDbContext db, UptClaims upt, DateTimeOffset now,
         CancellationToken cancellationToken)
@@ -54,19 +54,20 @@ public static class SignIn
                     return (linked, false);
                 }
 
+                var verified = upt.VerifiedEmail;
                 var existing = await db.Users.FirstOrDefaultAsync(u => u.EntraObjectId == upt.Oid, cancellationToken);
-                if (existing is null && upt.Email is { } email)
+                if (existing is null && verified is { } email)
                 {
                     existing = await db.Users.FirstOrDefaultAsync(u => u.Email == email
                         && !db.UserIdentities.Any(i => i.UserId == u.Id && i.Provider == UserIdentity.UptMicrosoft), cancellationToken);
                 }
 
                 var created = existing is null;
+                var emailFree = verified is not null && !await db.Users.AnyAsync(u => u.Email == verified, cancellationToken);
                 User user;
                 if (existing is null)
                 {
-                    var emailFree = upt.Email is not null && !await db.Users.AnyAsync(u => u.Email == upt.Email, cancellationToken);
-                    user = User.FromUpt(upt.Oid, emailFree ? upt.Email : null, upt.Name, now);
+                    user = User.FromUpt(upt.Oid, emailFree ? verified : null, upt.Name, now);
                     db.Users.Add(user);
                 }
                 else
@@ -74,6 +75,10 @@ public static class SignIn
                     user = existing;
                     user.LinkUpt(upt.Oid);
                     user.Seen(upt.Name, now);
+                    if (emailFree)
+                    {
+                        user.VerifyEmail(verified!);
+                    }
                 }
 
                 db.UserIdentities.Add(new UserIdentity(user.Id, UserIdentity.UptMicrosoft, upt.Oid, upt.Email, now));
@@ -89,8 +94,8 @@ public static class SignIn
 
     /// <summary>
     /// The account of an email sign-in (the code was right), and whether it was created now: the account with that
-    /// verified email, else one whose linked UPT account has it (the address becomes its email if it has none), else a
-    /// new account.
+    /// verified email, else one whose linked UPT account has it (a UPT address only; it becomes the account's email if it
+    /// has none), else a new account.
     /// </summary>
     public static async Task<(User User, bool Created)> EmailAsync(CampusPulseDbContext db, string email, DateTimeOffset now,
         CancellationToken cancellationToken)
@@ -99,9 +104,13 @@ public static class SignIn
         {
             try
             {
-                var user = await db.Users.FirstOrDefaultAsync(u => u.Email == email, cancellationToken)
-                    ?? await db.Users.Where(u => db.UserIdentities.Any(i => i.UserId == u.Id && i.Email == email))
+                var user = await db.Users.FirstOrDefaultAsync(u => u.Email == email, cancellationToken);
+                if (user is null && Emails.IsUpt(email))
+                {
+                    user = await db.Users.Where(u => db.UserIdentities.Any(i => i.UserId == u.Id && i.Email == email))
                         .OrderBy(u => u.CreatedAt).FirstOrDefaultAsync(cancellationToken);
+                }
+
                 if (user is not null)
                 {
                     user.VerifyEmail(email);
@@ -148,35 +157,49 @@ public static class SignIn
     }
 
     /// <summary>Replaces <paramref name="presented"/> with the next token of its family. A token that was already
-    /// replaced revokes the family (whoever holds the newest one is signed out too). The row is locked, so two refreshes
-    /// with one token can't both succeed: the second counts as reuse, so a client refreshes one at a time.</summary>
+    /// replaced revokes the family (whoever holds the newest one is signed out too), unless it was replaced less than
+    /// <see cref="RefreshToken.RetryWindow"/> ago and its replacement is unused (<see cref="RefreshToken.MayRetry"/>): the
+    /// client never got that answer, or sent two refreshes at once, and gets new tokens again. The account's row and then
+    /// the token's are locked, in the order <c>DELETE /me</c> locks them (so the two can't deadlock), and two refreshes of
+    /// one token run one after the other.</summary>
     public static async Task<(RefreshResult Result, TokenResponse? Response)> RefreshAsync(CampusPulseDbContext db, CampusPulseTokens tokens,
         string presented, DateTimeOffset now, CancellationToken cancellationToken)
     {
         var hash = RefreshToken.HashOf(presented);
+        var userId = await db.RefreshTokens.Where(t => t.TokenHash == hash).Select(t => (Guid?)t.UserId).SingleOrDefaultAsync(cancellationToken);
+        if (userId is null)
+        {
+            return (RefreshResult.Invalid, null);
+        }
+
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
-        var row = (await db.RefreshTokens.FromSql($"SELECT * FROM refresh_tokens WHERE token_hash = {hash} FOR UPDATE")
-            .ToListAsync(cancellationToken)).SingleOrDefault();
-        if (row is null)
+        var user = (await db.Users.FromSql($"SELECT * FROM users WHERE id = {userId} FOR UPDATE").ToListAsync(cancellationToken)).SingleOrDefault();
+        var row = user is null
+            ? null
+            : (await db.RefreshTokens.FromSql($"SELECT * FROM refresh_tokens WHERE token_hash = {hash} FOR UPDATE")
+                .ToListAsync(cancellationToken)).SingleOrDefault();
+        if (user is null || row is null)
         {
             return (RefreshResult.Invalid, null);
         }
 
         if (row.ReplacedByHash is not null)
         {
-            await RevokeFamilyAsync(db, row.FamilyId, now, cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-            return (RefreshResult.Reused, null);
+            var replacement = await db.RefreshTokens.SingleOrDefaultAsync(t => t.TokenHash == row.ReplacedByHash, cancellationToken);
+            if (!row.MayRetry(replacement, now))
+            {
+                await RevokeFamilyAsync(db, row.FamilyId, now, cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+                return (RefreshResult.Reused, null);
+            }
         }
-
-        if (!row.Usable(now))
+        else if (!row.Usable(now))
         {
             return (RefreshResult.Invalid, null);
         }
 
         var (next, refreshToken) = row.Rotate(now);
         db.RefreshTokens.Add(next);
-        var user = await db.Users.SingleAsync(u => u.Id == row.UserId, cancellationToken);
         user.Seen(null, now);
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);

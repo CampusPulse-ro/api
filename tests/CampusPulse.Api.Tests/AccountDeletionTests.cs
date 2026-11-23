@@ -39,6 +39,25 @@ public sealed class AccountDeletionTests(PostgresAppFactory factory) : IClassFix
         Assert.True(await db.EmailSignInCodes.AnyAsync(c => c.Email == other));   // someone else's address stays
     }
 
+    /// <summary>A UPT account whose address another account has keeps it only on its identity: deleting it leaves that
+    /// address's code row (the other account's live code and limits) alone.</summary>
+    [PostgresFact]
+    public async Task Deleting_an_account_keeps_the_codes_of_an_address_another_account_has()
+    {
+        using var app = new AccountsApp(factory);
+        var shared = AccountsApp.NewUptEmail();
+        var owner = await app.SignInByEmail(shared);
+        await app.Post("/me/identities/upt-microsoft", new { accessToken = TestAuth.Token(oid: "oid-" + Guid.NewGuid().ToString("N")) },
+            owner.AccessToken);
+        var other = await app.SignInWithUpt("oid-" + Guid.NewGuid().ToString("N"), shared);
+        Assert.Equal((true, (string?)null), (other.IsNew, other.User.Email));
+        await app.StartEmail(shared);
+
+        Assert.Equal(HttpStatusCode.NoContent, (await app.Send(HttpMethod.Delete, "/me", bearer: other.AccessToken)).StatusCode);
+
+        Assert.Equal(owner.User.Id, (await AccountsApp.Tokens(await app.VerifyEmail(shared, app.Email.CodeFor(shared)))).User.Id);
+    }
+
     [PostgresFact]
     public async Task The_cleanup_deletes_expired_sessions_and_old_code_rows()
     {
@@ -57,7 +76,8 @@ public sealed class AccountDeletionTests(PostgresAppFactory factory) : IClassFix
 }
 
 /// <summary>The accounts migration on a database of the previous release: every account becomes a UPT account with its
-/// identity, and its email the account's verified one when no older account has it.</summary>
+/// identity, and its email (a UPT address) the account's verified one when no older account has it. The previous
+/// release's own column is left as it was, so that release still works on the migrated schema.</summary>
 public sealed class AccountsMigrationTests
 {
     [PostgresFact]
@@ -79,18 +99,30 @@ public sealed class AccountsMigrationTests
                 INSERT INTO users (id, entra_object_id, email, display_name, created_at, last_seen_at) VALUES
                   ('01900000-0000-7000-8000-000000000001', 'oid-a', ' Ana@Student.UPT.ro ', 'Ana', now(), now()),
                   ('01900000-0000-7000-8000-000000000002', 'oid-b', 'ana@student.upt.ro', 'Ana again', now(), now()),
-                  ('01900000-0000-7000-8000-000000000003', 'oid-c', '', 'No email', now(), now());
+                  ('01900000-0000-7000-8000-000000000003', 'oid-c', '', 'No email', now(), now()),
+                  ('01900000-0000-7000-8000-000000000004', 'oid-d', 'Dan@Gmail.com', 'Dan', now(), now());
                 """);
 
             await db.Database.MigrateAsync();
 
-            var users = await db.Users.OrderBy(u => u.Id).Select(u => new { u.EntraObjectId, u.Email }).ToListAsync();
-            Assert.Equal(new (string?, string?)[] { ("oid-a", "ana@student.upt.ro"), ("oid-b", null), ("oid-c", null) },
+            var users = await db.Users.OrderBy(u => u.Id).Select(u => new { u.EntraObjectId, u.Email, u.LegacyEmail }).ToListAsync();
+            Assert.Equal(new (string?, string?)[] { ("oid-a", "ana@student.upt.ro"), ("oid-b", null), ("oid-c", null), ("oid-d", null) },
                 users.Select(u => (u.EntraObjectId, u.Email)));
+            Assert.Equal([" Ana@Student.UPT.ro ", "ana@student.upt.ro", "", "Dan@Gmail.com"], users.Select(u => u.LegacyEmail));
             var identities = await db.UserIdentities.OrderBy(i => i.Subject).ToListAsync();
-            Assert.Equal(["oid-a", "oid-b", "oid-c"], identities.Select(i => i.Subject));
+            Assert.Equal(["oid-a", "oid-b", "oid-c", "oid-d"], identities.Select(i => i.Subject));
             Assert.All(identities, i => Assert.Equal(UserIdentity.UptMicrosoft, i.Provider));
-            Assert.Equal(new string?[] { "ana@student.upt.ro", "ana@student.upt.ro", null }, identities.Select(i => i.Email));
+            Assert.Equal(new string?[] { "ana@student.upt.ro", "ana@student.upt.ro", null, "dan@gmail.com" }, identities.Select(i => i.Email));
+
+            // The previous release, rolled back to, adds students as it always did: an address another account has, or
+            // none, is no conflict in its column.
+            await db.Database.ExecuteSqlRawAsync("""
+                INSERT INTO users (id, entra_object_id, email, display_name, created_at, last_seen_at) VALUES
+                  ('01900000-0000-7000-8000-000000000005', 'oid-e', 'ana@student.upt.ro', 'Ana', now(), now()),
+                  ('01900000-0000-7000-8000-000000000006', 'oid-f', '', 'Nobody', now(), now()),
+                  ('01900000-0000-7000-8000-000000000007', 'oid-g', '', 'Nobody else', now(), now());
+                """);
+            Assert.Equal(0, await db.Users.CountAsync(u => u.EntraObjectId != null && u.LegacyEmail == null));
         }
         finally
         {

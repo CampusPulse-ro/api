@@ -84,7 +84,12 @@ public static partial class AuthEndpoints
             return InvalidEmail();
         }
 
-        if (!sender.IsConfigured || !tokens.IsConfigured)
+        if (!tokens.IsConfigured)
+        {
+            return SignInUnavailable();
+        }
+
+        if (!sender.IsConfigured)
         {
             return EmailUnavailable("No email sender is configured on this server.");
         }
@@ -92,6 +97,7 @@ public static partial class AuthEndpoints
         var email = Emails.Normalize(request.Email);
         var now = time.GetUtcNow();
         string code;
+        EmailSignInCode.Replaced replaced;
         await using (var transaction = await db.Database.BeginTransactionAsync(cancellationToken))
         {
             var row = await LockCodeAsync(db, email, create: true, cancellationToken);
@@ -104,15 +110,17 @@ public static partial class AuthEndpoints
             }
 
             code = EmailSignInCode.NewCode();
-            row.Issue(code, now);
+            replaced = row.Issue(code, now);
             await db.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
         }
 
+        // Sent and, when that fails, withdrawn whether or not the client is still waiting: a code issued and counted
+        // must not be left behind by a dropped connection. The sender's own timeout bounds it.
         var logger = loggers.CreateLogger(LogCategory);
-        if (!await sender.SendAsync(SignInEmail.Compose(email, code, request.Language), cancellationToken))
+        if (!await sender.SendAsync(SignInEmail.Compose(email, code, request.Language), CancellationToken.None))
         {
-            await WithdrawAsync(db, email, now, cancellationToken);
+            await WithdrawAsync(db, email, now, replaced, CancellationToken.None);
             LogCodeNotDelivered(logger);
             return EmailUnavailable("The email couldn't be sent. Try again later.");
         }
@@ -258,14 +266,16 @@ public static partial class AuthEndpoints
             .ToListAsync(cancellationToken)).SingleOrDefault();
     }
 
-    /// <summary>Takes back the code issued at <paramref name="issuedAt"/>, unless a newer one replaced it meanwhile.</summary>
-    private static async Task WithdrawAsync(CampusPulseDbContext db, string email, DateTimeOffset issuedAt, CancellationToken cancellationToken)
+    /// <summary>Takes back the code issued at <paramref name="issuedAt"/> and puts back the one it
+    /// <paramref name="replaced"/>, unless a newer code replaced it meanwhile.</summary>
+    private static async Task WithdrawAsync(CampusPulseDbContext db, string email, DateTimeOffset issuedAt,
+        EmailSignInCode.Replaced replaced, CancellationToken cancellationToken)
     {
         db.ChangeTracker.Clear();
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         if (await LockCodeAsync(db, email, create: false, cancellationToken) is { } row && row.IssuedAt(issuedAt))
         {
-            row.Withdraw(issuedAt);
+            row.Withdraw(issuedAt, replaced);
             await db.SaveChangesAsync(cancellationToken);
         }
 

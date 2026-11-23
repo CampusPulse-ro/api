@@ -7,11 +7,16 @@ namespace CampusPulse.Domain.Users;
 /// One of an account's refresh tokens, kept only as its SHA-256 (<see cref="TokenHash"/>): the token itself is 256
 /// random bits, base64url, and only the client has it. Every refresh replaces it with a new one of the same
 /// <see cref="FamilyId"/> (one sign-in on one device), each valid for <see cref="Lifetime"/>. Presenting a token that
-/// was already replaced means it was copied: the whole family is revoked. Deleted with the account.
+/// was already replaced means it was copied, and the whole family is revoked; except within <see cref="RetryWindow"/> of
+/// its replacement while the replacement is unused (<see cref="MayRetry"/>): the answer to a refresh got lost, or a client
+/// sent two at once. Deleted with the account.
 /// </summary>
 public sealed class RefreshToken
 {
     public static readonly TimeSpan Lifetime = TimeSpan.FromDays(60);
+
+    /// <summary>How long after its replacement a token may be refreshed again (see the class remarks).</summary>
+    public static readonly TimeSpan RetryWindow = TimeSpan.FromMinutes(1);
     public const int MethodMaxLength = 32;
 
     private RefreshToken()
@@ -56,12 +61,20 @@ public sealed class RefreshToken
 
     public bool Usable(DateTimeOffset now) => RevokedAt is null && now < ExpiresAt;
 
-    /// <summary>Replaces this token with the next of its family, and returns it with the token to hand out.</summary>
+    /// <summary>True when this token was replaced at most <see cref="RetryWindow"/> ago and hasn't expired: it may be
+    /// refreshed once more if its <paramref name="replacement"/> is still unused and unrevoked, meaning the client never
+    /// got it.</summary>
+    public bool MayRetry(RefreshToken? replacement, DateTimeOffset now) =>
+        ReplacedByHash is not null && RevokedAt is { } replacedAt && now - replacedAt <= RetryWindow && now < ExpiresAt
+        && replacement is { RevokedAt: null } && replacement.TokenHash == ReplacedByHash;
+
+    /// <summary>Replaces this token with the next of its family, and returns it with the token to hand out. A retry
+    /// (<see cref="MayRetry"/>) replaces it again; its retry window still counts from the first replacement.</summary>
     public (RefreshToken Row, string Token) Rotate(DateTimeOffset now)
     {
         var token = NewToken();
         var next = new RefreshToken(UserId, FamilyId, Method, HashOf(token), now);
-        RevokedAt = now;
+        RevokedAt ??= now;
         ReplacedByHash = next.TokenHash;
         return (next, token);
     }

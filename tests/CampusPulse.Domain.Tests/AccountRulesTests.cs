@@ -90,12 +90,28 @@ public sealed class EmailSignInCodeTests
     [Fact]
     public void A_withdrawn_code_doesnt_count_and_doesnt_work()
     {
-        var row = Issued("123456");
+        var row = new EmailSignInCode("ana@example.com");
+        var replaced = row.Issue("123456", T0);
 
-        row.Withdraw(T0);
+        row.Withdraw(T0, replaced);
 
         Assert.Empty(row.Sends);
         Assert.Equal(CodeCheck.Invalid, row.Check("123456", T0.AddMinutes(1)));
+    }
+
+    [Fact]
+    public void Withdrawing_a_resend_puts_the_earlier_code_back()
+    {
+        var row = Issued("123456");
+        Assert.Equal(CodeCheck.Invalid, row.Check("000000", T0.AddMinutes(1)));
+        var replaced = row.Issue("654321", T0.AddMinutes(2));
+
+        row.Withdraw(T0.AddMinutes(2), replaced);
+
+        Assert.Equal([T0], row.Sends);
+        Assert.Equal(1, row.Attempts);
+        Assert.Equal(CodeCheck.Invalid, row.Check("654321", T0.AddMinutes(3)));
+        Assert.Equal(CodeCheck.Accepted, row.Check("123456", T0.AddMinutes(3)));
     }
 
     private static EmailSignInCode Issued(string code)
@@ -136,6 +152,25 @@ public sealed class RefreshTokenTests
         Assert.Equal((row.FamilyId, row.UserId, "upt-microsoft"), (next.FamilyId, next.UserId, next.Method));
         Assert.Equal(RefreshToken.HashOf(nextToken), next.TokenHash);
         Assert.Equal(T0.AddDays(61), next.ExpiresAt);
+    }
+
+    [Fact]
+    public void A_replaced_token_may_be_retried_for_a_minute_while_its_replacement_is_unused()
+    {
+        var (row, _) = RefreshToken.Start(Guid.NewGuid(), "email", T0);
+        var (next, _) = row.Rotate(T0.AddDays(1));
+
+        Assert.True(row.MayRetry(next, T0.AddDays(1).AddSeconds(59)));
+        Assert.False(row.MayRetry(next, T0.AddDays(1).AddMinutes(1).AddSeconds(1)));
+        Assert.False(row.MayRetry(null, T0.AddDays(1)));
+        var (again, _) = row.Rotate(T0.AddDays(1).AddSeconds(30));
+        Assert.Equal(again.TokenHash, row.ReplacedByHash);
+        Assert.False(row.MayRetry(next, T0.AddDays(1).AddSeconds(40)));   // not its replacement any more
+        Assert.True(row.MayRetry(again, T0.AddDays(1).AddSeconds(40)));
+        Assert.False(row.MayRetry(again, T0.AddDays(1).AddSeconds(61)));  // the window counts from the first replacement
+
+        again.Rotate(T0.AddDays(1).AddSeconds(45));                       // the replacement was used
+        Assert.False(row.MayRetry(again, T0.AddDays(1).AddSeconds(50)));
     }
 }
 

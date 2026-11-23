@@ -942,7 +942,7 @@ namespace CampusPulse.Infrastructure.Migrations
                     b.Property<string>("Email")
                         .HasMaxLength(320)
                         .HasColumnType("character varying(320)")
-                        .HasColumnName("email");
+                        .HasColumnName("verified_email");
 
                     b.Property<string>("EntraObjectId")
                         .HasMaxLength(64)
@@ -953,12 +953,18 @@ namespace CampusPulse.Infrastructure.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("last_seen_at");
 
+                    b.Property<string>("LegacyEmail")
+                        .IsRequired()
+                        .HasMaxLength(320)
+                        .HasColumnType("character varying(320)")
+                        .HasColumnName("email");
+
                     b.HasKey("Id")
                         .HasName("pk_users");
 
                     b.HasIndex("Email")
                         .IsUnique()
-                        .HasDatabaseName("ix_users_email");
+                        .HasDatabaseName("ix_users_verified_email");
 
                     b.HasIndex("EntraObjectId")
                         .IsUnique()

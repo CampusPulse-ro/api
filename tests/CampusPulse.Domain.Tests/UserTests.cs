@@ -12,6 +12,7 @@ public sealed class UserTests
         var user = User.FromEmail(" Ana.Pop@Example.COM ", T0);
 
         Assert.Equal(("ana.pop@example.com", "ana.pop", (string?)null), (user.Email, user.DisplayName, user.EntraObjectId));
+        Assert.Equal("ana.pop@example.com", user.LegacyEmail);
         Assert.Equal((T0, T0), (user.CreatedAt, user.LastSeenAt));
     }
 
@@ -21,6 +22,7 @@ public sealed class UserTests
         var user = User.FromUpt("oid-1", null, " Ana Pop ", T0);
 
         Assert.Equal(("oid-1", (string?)null, "Ana Pop"), (user.EntraObjectId, user.Email, user.DisplayName));
+        Assert.Equal("", user.LegacyEmail);   // the previous release reads a non-null string
         user.UnlinkUpt();
         Assert.Null(user.EntraObjectId);
     }
@@ -33,8 +35,17 @@ public sealed class UserTests
         user.VerifyEmail("Ana@Student.upt.ro");
         user.VerifyEmail("other@example.com");
 
-        Assert.Equal("ana@student.upt.ro", user.Email);
+        Assert.Equal(("ana@student.upt.ro", "ana@student.upt.ro"), (user.Email, user.LegacyEmail));
     }
+
+    [Theory]
+    [InlineData("ana@student.upt.ro", true)]
+    [InlineData("prof@upt.ro", true)]
+    [InlineData("x@cs.upt.ro", true)]
+    [InlineData("ana@notupt.ro", false)]
+    [InlineData("ana@upt.ro.example.com", false)]
+    [InlineData("ana@gmail.com", false)]
+    public void Only_UPT_domains_count_as_UPT_addresses(string email, bool upt) => Assert.Equal(upt, Emails.IsUpt(email));
 
     [Fact]
     public void Seen_saves_at_most_every_five_minutes_unless_the_name_changed()

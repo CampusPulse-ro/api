@@ -94,7 +94,7 @@ public sealed class UptAccountTests(PostgresAppFactory factory) : IClassFixture<
     public async Task A_UPT_account_whose_address_another_account_has_gets_none()
     {
         using var app = new AccountsApp(factory);
-        var email = AccountsApp.NewEmail();
+        var email = AccountsApp.NewUptEmail();
         var owner = await app.SignInByEmail(email);
         await app.Post("/me/identities/upt-microsoft", new { accessToken = TestAuth.Token(oid: NewOid(), email: email) }, owner.AccessToken);
 
@@ -103,6 +103,30 @@ public sealed class UptAccountTests(PostgresAppFactory factory) : IClassFixture<
         Assert.True(other.IsNew);
         Assert.NotEqual(owner.User.Id, other.User.Id);
         Assert.Null(other.User.Email);
+    }
+
+    /// <summary>Only a UPT address is trusted from a token (Microsoft doesn't vouch for the email claim): another
+    /// address links to nothing, doesn't become the account's email, and a code to it doesn't open the UPT
+    /// account.</summary>
+    [PostgresFact]
+    public async Task A_token_address_outside_UPT_is_not_trusted()
+    {
+        using var app = new AccountsApp(factory);
+        var taken = AccountsApp.NewEmail();
+        var owner = await app.SignInByEmail(taken);
+        var lone = AccountsApp.NewEmail();
+
+        var upt = await app.SignInWithUpt(NewOid(), taken);
+        var uptOnly = await app.SignInWithUpt(NewOid(), lone);
+        var byCode = await app.SignInByEmail(lone);
+
+        Assert.Equal((true, (string?)null), (upt.IsNew, upt.User.Email));
+        Assert.NotEqual(owner.User.Id, upt.User.Id);
+        Assert.Equal(taken, Assert.Single(upt.User.Identities).Email);
+        Assert.Null(uptOnly.User.Email);
+        Assert.True(byCode.IsNew);
+        Assert.NotEqual(uptOnly.User.Id, byCode.User.Id);
+        Assert.Equal(owner.User.Id, (await app.SignInByEmail(taken)).User.Id);
     }
 
     /// <summary>Installed app versions: a UPT Entra token as the bearer, and POST /me to make the account, reach the same

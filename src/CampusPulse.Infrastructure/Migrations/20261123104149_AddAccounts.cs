@@ -22,15 +22,12 @@ namespace CampusPulse.Infrastructure.Migrations
                 oldType: "character varying(64)",
                 oldMaxLength: 64);
 
-            migrationBuilder.AlterColumn<string>(
-                name: "email",
+            migrationBuilder.AddColumn<string>(
+                name: "verified_email",
                 table: "users",
                 type: "character varying(320)",
                 maxLength: 320,
-                nullable: true,
-                oldClrType: typeof(string),
-                oldType: "character varying(320)",
-                oldMaxLength: 320);
+                nullable: true);
 
             migrationBuilder.CreateTable(
                 name: "deadlines",
@@ -119,22 +116,25 @@ namespace CampusPulse.Infrastructure.Migrations
                         onDelete: ReferentialAction.Cascade);
                 });
 
-            // Every existing account is a UPT account: it gets its upt-microsoft identity (subject = its oid). Its
-            // email becomes the account's verified email, normalized; when two accounts have the same one, the older
-            // keeps it (the unique index below needs that). Written by hand.
+            // Hand-written. Every account so far was made by a UPT sign-in: each gets its upt-microsoft identity, with
+            // the address its token carried, and that address normalized becomes its verified email when it is a UPT
+            // address (Emails.IsUpt) and no older account has it. users.email stays as it was: the previous release
+            // keeps reading and writing it after a rollback.
             migrationBuilder.Sql("""
                 INSERT INTO user_identities (provider, subject, user_id, email, linked_at)
                 SELECT 'upt-microsoft', entra_object_id, id, NULLIF(lower(btrim(email)), ''), created_at
                 FROM users WHERE entra_object_id IS NOT NULL;
-                UPDATE users SET email = NULLIF(lower(btrim(email)), '');
-                UPDATE users u SET email = NULL
-                WHERE email IS NOT NULL AND EXISTS (SELECT 1 FROM users o WHERE o.email = u.email AND o.id < u.id);
+                UPDATE users SET verified_email = lower(btrim(email))
+                WHERE lower(btrim(email)) LIKE '%@upt.ro' OR lower(btrim(email)) LIKE '%.upt.ro';
+                UPDATE users u SET verified_email = NULL
+                WHERE verified_email IS NOT NULL
+                  AND EXISTS (SELECT 1 FROM users o WHERE o.verified_email = u.verified_email AND o.id < u.id);
                 """);
 
             migrationBuilder.CreateIndex(
-                name: "ix_users_email",
+                name: "ix_users_verified_email",
                 table: "users",
-                column: "email",
+                column: "verified_email",
                 unique: true);
 
             migrationBuilder.CreateIndex(
@@ -190,14 +190,15 @@ namespace CampusPulse.Infrastructure.Migrations
                 name: "user_identities");
 
             migrationBuilder.DropIndex(
-                name: "ix_users_email",
+                name: "ix_users_verified_email",
                 table: "users");
 
-            // The previous model needs both: accounts made by email (no UPT id) can't be kept. Written by hand.
-            migrationBuilder.Sql("""
-                DELETE FROM users WHERE entra_object_id IS NULL;
-                UPDATE users SET email = '' WHERE email IS NULL;
-                """);
+            migrationBuilder.DropColumn(
+                name: "verified_email",
+                table: "users");
+
+            // Hand-written: accounts made by email have no Entra object id, which the previous schema requires.
+            migrationBuilder.Sql("DELETE FROM users WHERE entra_object_id IS NULL;");
 
             migrationBuilder.AlterColumn<string>(
                 name: "entra_object_id",
@@ -209,18 +210,6 @@ namespace CampusPulse.Infrastructure.Migrations
                 oldClrType: typeof(string),
                 oldType: "character varying(64)",
                 oldMaxLength: 64,
-                oldNullable: true);
-
-            migrationBuilder.AlterColumn<string>(
-                name: "email",
-                table: "users",
-                type: "character varying(320)",
-                maxLength: 320,
-                nullable: false,
-                defaultValue: "",
-                oldClrType: typeof(string),
-                oldType: "character varying(320)",
-                oldMaxLength: 320,
                 oldNullable: true);
         }
     }

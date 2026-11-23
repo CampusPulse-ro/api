@@ -75,6 +75,7 @@ public static partial class MeEndpoint
 
         app.MapDelete("/me/identities/upt-microsoft", UnlinkUpt)
             .RequireAuthorization()
+            .RequireRateLimiting(RateLimitSetup.AccountPolicy)
             .WithName("UnlinkUpt")
             .WithTags("Users")
             .ProducesProblem(StatusCodes.Status404NotFound)
@@ -146,7 +147,7 @@ public static partial class MeEndpoint
     /// account. 200 also when it was linked already. 409 <c>identity-in-use</c> when that UPT account belongs to another
     /// CampusPulse account (accounts aren't merged), 409 <c>already-linked</c> when this account has a different UPT
     /// account; 401 <c>microsoft-token-invalid</c>; 503 <c>microsoft-unavailable</c>. An account without a verified
-    /// email gets the UPT account's, when no other account has it.
+    /// email gets the UPT account's, when it is a UPT address and no other account has it.
     /// </summary>
     internal static async Task<Results<Ok<MeResponse>, ProblemHttpResult>> LinkUpt(MicrosoftTokenRequest request,
         ClaimsPrincipal principal, CampusPulseDbContext db, EntraTokenValidator entra, TimeProvider time, ILoggerFactory loggers,
@@ -187,7 +188,7 @@ public static partial class MeEndpoint
 
         user.LinkUpt(upt.Oid);
         user.Seen(upt.Name, now);
-        if (user.Email is null && upt.Email is { } email && !await db.Users.AnyAsync(u => u.Email == email, cancellationToken))
+        if (user.Email is null && upt.VerifiedEmail is { } email && !await db.Users.AnyAsync(u => u.Email == email, cancellationToken))
         {
             user.VerifyEmail(email);
         }

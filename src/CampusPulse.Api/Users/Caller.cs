@@ -39,6 +39,11 @@ public static class Caller
 /// (<c>email</c>, else the UPN in <c>preferred_username</c>; normalized) and the name.</summary>
 public sealed record UptClaims(string Oid, string? Email, string? Name)
 {
+    /// <summary><see cref="Email"/> when it is one of UPT's own addresses (<see cref="Emails.IsUpt"/>), else null. Only
+    /// this one links accounts or becomes an account's email: Microsoft doesn't vouch for a token's email claim, and a
+    /// tenant can put any address there.</summary>
+    public string? VerifiedEmail => Email is { } email && Emails.IsUpt(email) ? email : null;
+
     public static UptClaims From(ClaimsPrincipal principal)
     {
         var email = FirstNonEmpty(principal, "email", "preferred_username");

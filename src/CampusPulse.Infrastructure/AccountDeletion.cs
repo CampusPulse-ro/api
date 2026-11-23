@@ -8,7 +8,8 @@ public static class AccountDeletion
     /// Deletes the account <paramref name="userId"/> and adds one to <paramref name="day"/>'s deletion count, in one
     /// transaction. Everything else the student owns goes with the row: every table that refers to <c>users</c> does
     /// so with ON DELETE CASCADE (a test fails otherwise). The email sign-in codes are per address, not per account,
-    /// so the codes of the account's addresses (its own and its identities') are deleted here.
+    /// so the code rows of the account's addresses (its own and its identities') are deleted here, unless another
+    /// account signs in with that address too (a UPT account whose address another account has).
     /// Returns false, counting nothing, when there was no such account.
     /// Concurrent calls for the same student count once: the second DELETE waits on the first's row
     /// lock, then finds no row. The count is an atomic upsert, so deletions of different students on
@@ -30,7 +31,9 @@ public static class AccountDeletion
 
         if (emails.Count > 0)
         {
-            await db.EmailSignInCodes.Where(c => emails.Contains(c.Email)).ExecuteDeleteAsync(cancellationToken);
+            await db.EmailSignInCodes
+                .Where(c => emails.Contains(c.Email) && !db.Users.Any(u => u.Email == c.Email) && !db.UserIdentities.Any(i => i.Email == c.Email))
+                .ExecuteDeleteAsync(cancellationToken);
         }
 
         await db.Database.ExecuteSqlAsync($"""

@@ -1,4 +1,5 @@
 using System.Net;
+using CampusPulse.Domain.Users;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.JsonWebTokens;
@@ -40,8 +41,8 @@ public sealed class SessionTests(PostgresAppFactory factory) : IClassFixture<Pos
         Assert.DoesNotContain(rows, r => r.TokenHash == first.RefreshToken || r.TokenHash == second.RefreshToken);
     }
 
-    /// <summary>Showing a token that was already replaced means it was copied: the whole session is revoked, the newest
-    /// token too, and the other sessions of the account are not.</summary>
+    /// <summary>Showing a token that was already replaced (more than a minute ago) means it was copied: the whole
+    /// session is revoked, the newest token too, and the other sessions of the account are not.</summary>
     [PostgresFact]
     public async Task Reusing_a_replaced_refresh_token_revokes_its_whole_session()
     {
@@ -50,6 +51,7 @@ public sealed class SessionTests(PostgresAppFactory factory) : IClassFixture<Pos
         var phone = await app.SignInByEmail(email);
         var laptop = await app.SignInByEmail(email);
         var rotated = await AccountsApp.Tokens(await app.Post("/auth/refresh", new { refreshToken = phone.RefreshToken }));
+        app.Clock.Advance(RefreshToken.RetryWindow + TimeSpan.FromSeconds(1));
 
         var reuse = await app.Post("/auth/refresh", new { refreshToken = phone.RefreshToken });
         var newest = await app.Post("/auth/refresh", new { refreshToken = rotated.RefreshToken });
@@ -58,6 +60,41 @@ public sealed class SessionTests(PostgresAppFactory factory) : IClassFixture<Pos
         Assert.Equal((HttpStatusCode.Unauthorized, "refresh-invalid"), await AccountsApp.Problem(reuse));
         Assert.Equal((HttpStatusCode.Unauthorized, "refresh-invalid"), await AccountsApp.Problem(newest));
         Assert.Equal(HttpStatusCode.OK, other.StatusCode);
+    }
+
+    /// <summary>A refresh whose answer got lost can be sent again for a minute, as long as the token that answer held
+    /// is unused; once its successor is used, the old token is a copy again.</summary>
+    [PostgresFact]
+    public async Task A_lost_refresh_answer_can_be_retried_for_a_minute()
+    {
+        using var app = new AccountsApp(factory);
+        var first = await app.SignInByEmail(AccountsApp.NewEmail());
+        var lost = await AccountsApp.Tokens(await app.Post("/auth/refresh", new { refreshToken = first.RefreshToken }));
+        app.Clock.Advance(TimeSpan.FromSeconds(30));
+
+        var retried = await AccountsApp.Tokens(await app.Post("/auth/refresh", new { refreshToken = first.RefreshToken }));
+        var next = await AccountsApp.Tokens(await app.Post("/auth/refresh", new { refreshToken = retried.RefreshToken }));
+
+        Assert.NotEqual(lost.RefreshToken, retried.RefreshToken);
+        Assert.Equal(first.User.Id, next.User.Id);
+        Assert.Equal((HttpStatusCode.Unauthorized, "refresh-invalid"),
+            await AccountsApp.Problem(await app.Post("/auth/refresh", new { refreshToken = first.RefreshToken })));
+        Assert.Equal((HttpStatusCode.Unauthorized, "refresh-invalid"),
+            await AccountsApp.Problem(await app.Post("/auth/refresh", new { refreshToken = next.RefreshToken })));
+    }
+
+    [PostgresFact]
+    public async Task Two_refreshes_of_one_token_at_once_both_get_tokens()
+    {
+        using var app = new AccountsApp(factory);
+        var first = await app.SignInByEmail(AccountsApp.NewEmail());
+
+        var answers = await Task.WhenAll(Enumerable.Range(0, 2).Select(_ => app.Post("/auth/refresh", new { refreshToken = first.RefreshToken })));
+
+        Assert.All(answers, answer => Assert.Equal(HttpStatusCode.OK, answer.StatusCode));
+        var tokens = await Task.WhenAll(answers.Select(AccountsApp.Tokens));
+        Assert.NotEqual(tokens[0].RefreshToken, tokens[1].RefreshToken);
+        Assert.Equal(HttpStatusCode.OK, (await app.Post("/auth/refresh", new { refreshToken = tokens[1].RefreshToken })).StatusCode);
     }
 
     [PostgresFact]
@@ -140,7 +177,7 @@ public sealed class SessionTests(PostgresAppFactory factory) : IClassFixture<Pos
     {
         using var app = new AccountsApp(factory, new Dictionary<string, string> { ["Auth:SigningKey"] = "" });
 
-        Assert.Equal((HttpStatusCode.ServiceUnavailable, "email-unavailable"), await AccountsApp.Problem(await app.StartEmail(AccountsApp.NewEmail())));
+        Assert.Equal((HttpStatusCode.ServiceUnavailable, "sign-in-unavailable"), await AccountsApp.Problem(await app.StartEmail(AccountsApp.NewEmail())));
         Assert.Equal((HttpStatusCode.ServiceUnavailable, "sign-in-unavailable"),
             await AccountsApp.Problem(await app.Post("/auth/refresh", new { refreshToken = "x" })));
         Assert.Equal(HttpStatusCode.Unauthorized, (await app.Send(HttpMethod.Get, "/me", bearer: TestAuth.OwnToken(Guid.NewGuid()))).StatusCode);

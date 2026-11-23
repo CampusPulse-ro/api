@@ -59,6 +59,9 @@ public sealed class AccountsApp : IDisposable
 
     public static string NewEmail() => $"student-{Guid.NewGuid():N}@example.com";
 
+    /// <summary>A fresh address in UPT's domain, the only kind a UPT token's address is trusted for.</summary>
+    public static string NewUptEmail() => $"student-{Guid.NewGuid():N}@student.upt.ro";
+
     public Task<HttpResponseMessage> Post(string path, object body, string? bearer = null) => Send(HttpMethod.Post, path, body, bearer);
 
     public async Task<HttpResponseMessage> Send(HttpMethod method, string path, object? body = null, string? bearer = null)

@@ -73,10 +73,14 @@ public sealed class EmailSignInCode
         return recent.Count >= DailyLimit ? recent[^DailyLimit] + DailyWindow - now : null;
     }
 
+    /// <summary>The code an <see cref="Issue"/> replaced, to put back if the new one can't be sent.</summary>
+    public sealed record Replaced(byte[]? CodeHash, byte[]? Salt, DateTimeOffset ExpiresAt, int Attempts, DateTimeOffset CreatedAt);
+
     /// <summary>Replaces any live code with <paramref name="code"/>, valid from <paramref name="now"/>, and records the
-    /// send.</summary>
-    public void Issue(string code, DateTimeOffset now)
+    /// send. Returns the code it replaced.</summary>
+    public Replaced Issue(string code, DateTimeOffset now)
     {
+        var replaced = new Replaced(CodeHash, Salt, ExpiresAt, Attempts, CreatedAt);
         now = Instants.Stored(now);
         Salt = RandomNumberGenerator.GetBytes(16);
         CodeHash = Hash(Salt, code);
@@ -84,14 +88,17 @@ public sealed class EmailSignInCode
         Attempts = 0;
         CreatedAt = now;
         Sends = [.. Sends.Where(s => now - s < DailyWindow), now];
+        return replaced;
     }
 
-    /// <summary>Takes back the code just issued and its send: it couldn't be delivered.</summary>
-    public void Withdraw(DateTimeOffset sentAt)
+    /// <summary>Takes back the code issued at <paramref name="sentAt"/> and its send, since it couldn't be delivered,
+    /// and puts back the code it <paramref name="replaced"/>: a failed resend leaves the earlier email's code
+    /// working.</summary>
+    public void Withdraw(DateTimeOffset sentAt, Replaced replaced)
     {
         sentAt = Instants.Stored(sentAt);
-        CodeHash = null;
-        Salt = null;
+        (CodeHash, Salt, ExpiresAt, Attempts, CreatedAt) =
+            (replaced.CodeHash, replaced.Salt, replaced.ExpiresAt, replaced.Attempts, replaced.CreatedAt);
         Sends = [.. Sends.Where(s => s != sentAt)];
     }
 

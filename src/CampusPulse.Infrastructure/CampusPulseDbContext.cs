@@ -63,9 +63,12 @@ public sealed class CampusPulseDbContext(DbContextOptions<CampusPulseDbContext> 
             // The previous release's key (see User): nullable now, unique while set. Identities are the key now.
             user.Property(u => u.EntraObjectId).HasMaxLength(User.EntraObjectIdMaxLength);
             user.HasIndex(u => u.EntraObjectId).IsUnique();
-            // The account's verified email, stored normalized (trimmed, lowercase), so unique whatever the case.
-            user.Property(u => u.Email).HasMaxLength(User.EmailMaxLength);
+            // The account's verified email, stored normalized (trimmed, lowercase), so unique whatever the case. A new
+            // column: users.email stays the previous release's (non-null, not unique, written by it with any token's
+            // address), so that release still reads and creates accounts after a rollback.
+            user.Property(u => u.Email).HasColumnName("verified_email").HasMaxLength(User.EmailMaxLength);
             user.HasIndex(u => u.Email).IsUnique();
+            user.Property(u => u.LegacyEmail).HasColumnName("email").HasMaxLength(User.EmailMaxLength).IsRequired();
             user.Property(u => u.DisplayName).HasMaxLength(User.DisplayNameMaxLength).IsRequired();
             // Every table holding a student's data refers to this one with ON DELETE CASCADE, so
             // deleting the row deletes the account (AccountDeletion). A test fails otherwise.

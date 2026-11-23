@@ -104,28 +104,33 @@ All JSON; errors are ProblemDetails whose **`type`** is stable and says which (t
 
 ### Accounts, codes and sessions
 
-- **An account's email is verified**: confirmed with a code, or a UPT account's (Microsoft verified it). It is unique
-  and stored normalized (trimmed, lowercase). An email account's first name is the address's local part; linking UPT
-  sets the UPT name.
+- **An account's email is verified**: confirmed with a code, or a UPT account's address when it is one of UPT's own
+  (`upt.ro` or a subdomain such as `student.upt.ro`). Microsoft doesn't vouch for a token's `email` claim, and a tenant
+  can put any address there, so a UPT token's other addresses are only shown on the identity: they link nothing and
+  open nothing. It is unique and stored normalized (trimmed, lowercase). An email account's first name is the
+  address's local part; linking UPT sets the UPT name.
 - **Codes:** 6 digits, valid **10 minutes**, **5 wrong attempts** then burned; a new code replaces the last; only a
   salted SHA-256 is stored. An address gets **3 codes per 15 minutes and 10 a day**; `/auth/email/start` is also
   limited per client IP (20 an hour), and every `/auth/*` call (60 a minute per IP): see [Rate limits](#rate-limits).
-- **Email sign-in finds** the account with that verified email, else one whose linked UPT account has it, else makes a
-  new one.
+- **Email sign-in finds** the account with that verified email, else one whose linked UPT account has it (a UPT
+  address), else makes a new one.
 - **UPT sign-in finds** the account of that UPT account; else **links automatically** to an account whose verified email
   is the UPT account's (both addresses are verified, so it is the same person) and that has no UPT account yet; else
-  makes a new one, with the UPT email unless another account has it (then the account has no email, and can only sign
-  in with UPT until it gets one).
+  makes a new one, with the UPT address unless another account has it or it isn't a UPT one (then the account has no
+  email, and can only sign in with UPT until it gets one).
 - **Refresh tokens:** 256 random bits (base64url), stored as their SHA-256, **60 days** from each refresh, replaced on
   every refresh. One sign-in on one device is one *family*; a token that was already replaced, shown again, means it was
-  copied, and revokes the family. So a client **refreshes one request at a time**: two refreshes with one token count as
-  reuse and sign the device out.
+  copied, and revokes the family. Except for **one minute** after its replacement while the replacement is unused: then
+  the client never got that answer (a dropped connection) or sent two refreshes at once, and it gets new tokens again.
+  Clients still refresh one request at a time: a retry after that minute, or after the new token was used, signs the
+  device out.
 - Logged as counts only (`Email sign-in code sent`, `Signed in with UPT (new account: True)`, `A refresh token was used
   again: its session was revoked`): never a code, a token or an address. An hourly job deletes expired refresh tokens
   and an address's code row a day after its last code.
 - **Unconfigured:** without `Auth__SigningKey` (outside Development, where a key per process is made up) no session is
-  issued: `/auth/*` answers 503 and only UPT Entra tokens work. Without `Auth__TenantId` / `Auth__ClientId`, UPT tokens
-  are refused and `/auth/microsoft` answers 503. Either way nothing gets in anonymously; the start logs a warning.
+  issued: `/auth/*` answers 503 `sign-in-unavailable` and only UPT Entra tokens work. Without `Auth__TenantId` /
+  `Auth__ClientId`, UPT tokens are refused and `/auth/microsoft` answers 503 `microsoft-unavailable`. Either way nothing
+  gets in anonymously; the start logs a warning.
 
 ### UPT Microsoft (Entra) tokens
 
@@ -150,7 +155,8 @@ clients don't send the student back to sign in) and `/auth/microsoft` answers 50
   email → `POST /auth/email/start` → the 6-digit code → `POST /auth/email/verify`. Offer "resend" after
   `resendAfterSeconds`; show `invalid-code` and `code-burned`.
 - **Keep our refresh token** (mobile: SecureStore; web: localStorage), send our access token as the bearer, refresh
-  before `accessTokenExpiresAt` and retry once on a 401. **One refresh at a time.** When refresh answers 401, sign out
+  before `accessTokenExpiresAt` and retry once on a 401. **One refresh at a time** (a retry of a lost refresh within a
+  minute is fine). When refresh answers 401, sign out
   locally. On sign-out call `POST /auth/sign-out` with the refresh token, then drop both.
 - **Link UPT:** run the Microsoft flow, then `POST /me/identities/upt-microsoft` with its access token. Unlink with
   `DELETE`, after a confirmation; the server refuses unlinking the last sign-in method.
@@ -250,10 +256,13 @@ clients follow `main`.
 
 ## Data
 
-- `users`: one row per account (CampusPulse-ro/api#63): `id`, the verified `email` (normalized, unique; null for an
-  account made with UPT whose address another account had), name, first and last seen. `entra_object_id` is the UPT
-  account's `oid` while one is linked: what the previous release keyed accounts by, kept nullable and in step with the
-  identity so that release still finds its students after a rollback (expand now, drop it in a later release).
+- `users`: one row per account (CampusPulse-ro/api#63): `id`, `verified_email` (normalized, unique; null for an
+  account made with UPT whose address another account had or isn't a UPT one), name, first and last seen.
+  - Two columns are the previous release's, kept so it still works on this schema after a rollback (a rollback
+    restores code, not schema): `entra_object_id`, the UPT account's `oid` while one is linked (now nullable, still
+    unique), and `email` (non-null, not unique; this release keeps it equal to `verified_email`, `''` for none, and never
+    reads it). Accounts made by email have no `entra_object_id`, so the previous release doesn't see them. Both columns go
+    in a later release (contract).
 - `user_identities`: the sign-in methods linked to an account other than its email: one `upt-microsoft` row (`subject`
   = the `oid`, unique per provider; the UPT account's email; when it was linked). The migration made one for every
   existing account.
@@ -437,8 +446,9 @@ Sign-in codes are the only email the API sends (`IEmailSender`, chosen at startu
 The email is plain text with a minimal HTML copy, in English or Romanian (`language` in the request): the subject
 carries the code ("Your CampusPulse code: 123456", "Codul tău CampusPulse: 123456") so it shows in a notification, and
 there are **no links** in it, so a phished copy has nothing to click. When Resend refuses or can't be reached the
-request answers 503 `email-unavailable` and the code is withdrawn: it doesn't count against the address's limit and
-can't be used. Logged: `Resend refused an email: HTTP 422` or `Resend couldn't be reached: <exception type>`, never
+request answers 503 `email-unavailable` and the new code is withdrawn: it doesn't count against the address's limit and
+can't be used, and the code it replaced (an earlier email's, still within its 10 minutes) works again. The send isn't
+tied to the request, so a client that disconnects can't leave a code issued and counted behind. Logged: `Resend refused an email: HTTP 422` or `Resend couldn't be reached: <exception type>`, never
 the address, the code or Resend's answer (which may quote them).
 
 ## Timetable
