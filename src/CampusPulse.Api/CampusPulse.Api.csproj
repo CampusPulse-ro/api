@@ -38,16 +38,16 @@
     <PackageReference Include="ClosedXML" Version="0.105.1" />
     <!-- The import's overrides file. MIT. -->
     <PackageReference Include="YamlDotNet" Version="18.1.0" />
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.14" />
-    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.14" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.15" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.15" />
     <!-- Writes the OpenAPI document at build time: openapi/v1.json at the repo root is the
          contract the mobile and web clients generate their types from, committed, and CI fails
          when it is stale. -->
-    <PackageReference Include="Microsoft.Extensions.ApiDescription.Server" Version="10.0.14">
+    <PackageReference Include="Microsoft.Extensions.ApiDescription.Server" Version="10.0.15">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.14">
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.15">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
@@ -55,7 +55,7 @@
          GHSA-v5pm-xwqc-g5wc (high: circular schema refs abort parsing). 2.7.5 is the first
          patched 2.x release. Do NOT jump to 3.x: it makes IOpenApiMediaType.Example read-only
          and the ASP.NET Core 10 XML-comment source generator fails to compile. -->
-    <PackageReference Include="Microsoft.OpenApi" Version="2.13.0" />
+    <PackageReference Include="Microsoft.OpenApi" Version="2.13.1" />
     <!-- Metrics (MetricsSetup): the OpenTelemetry SDK, and its Prometheus exporter for ASP.NET Core. The exporter is
          the only Prometheus one OpenTelemetry ships and is still marked beta (the Prometheus spec it follows isn't
          final); it is the one Microsoft's ASP.NET Core metrics docs use. Pinned to the release of the SDK. -->
